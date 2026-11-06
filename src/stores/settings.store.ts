@@ -87,3 +87,4 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
     saveSettings(DEFAULT_APP_SETTINGS);
   },
 }));
+

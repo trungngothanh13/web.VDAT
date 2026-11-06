@@ -38,3 +38,4 @@ export function showBrowserNotification(options: NotificationOptions): Notificat
 
   return notification;
 }
+

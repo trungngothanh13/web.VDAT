@@ -30,3 +30,4 @@ export const cameraApi = {
     return data;
   },
 };
+

@@ -16,3 +16,4 @@ export const updateZoneSchema = z.object({
 });
 
 export type UpdateZoneFormData = z.infer<typeof updateZoneSchema>;
+

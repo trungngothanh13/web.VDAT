@@ -71,3 +71,4 @@ export function exportViolationsToJson(violations: Violation[], filename: string
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+

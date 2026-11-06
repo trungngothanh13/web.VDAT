@@ -41,3 +41,4 @@ export const env = {
   isDev: typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.DEV : true,
   isProd: typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.PROD : false,
 } as const;
+

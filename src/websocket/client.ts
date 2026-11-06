@@ -219,3 +219,4 @@ export class VdatWebSocketClient {
 
 // Global singleton instance for application-wide use
 export const vdatWsClient = new VdatWebSocketClient();
+

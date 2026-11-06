@@ -94,3 +94,4 @@ export const useViolationStore = create<ViolationStoreState>((set) => ({
 
   clearLiveAlerts: () => set({ liveAlerts: [], unreadAlertCount: 0 }),
 }));
+

@@ -41,3 +41,4 @@ export const useCameraStore = create<CameraStoreState>((set) => ({
       selectedCamera: state.selectedCamera?.id === updated.id ? updated : state.selectedCamera,
     })),
 }));
+

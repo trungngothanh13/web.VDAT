@@ -256,3 +256,4 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     frameToScreenCoordinates,
   };
 }
+

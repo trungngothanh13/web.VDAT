@@ -65,3 +65,4 @@ export interface UpdateViolationStatusPayload {
   status: 'CONFIRMED' | 'DISMISSED';
   notes?: string;
 }
+

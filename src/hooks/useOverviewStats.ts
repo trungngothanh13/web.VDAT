@@ -11,3 +11,4 @@ export function useOverviewStats(refetchInterval: number = 15000) {
     refetchInterval,
   });
 }
+

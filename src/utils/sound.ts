@@ -75,3 +75,4 @@ export function playSuccessTone(volume: number = 0.5): void {
   osc.start(ctx.currentTime);
   osc.stop(ctx.currentTime + 0.2);
 }
+

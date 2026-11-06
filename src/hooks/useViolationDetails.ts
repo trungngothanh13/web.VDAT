@@ -11,3 +11,4 @@ export function useViolationDetails(id?: string) {
     staleTime: 30000,
   });
 }
+

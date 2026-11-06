@@ -68,3 +68,4 @@ export interface PingMessage {
 export type OutboundWSMessage = PingMessage;
 
 export type StreamConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+

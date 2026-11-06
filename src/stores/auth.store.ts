@@ -117,3 +117,4 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
   isAdmin: () => get().user?.role === 'ADMIN',
   isPolice: () => get().user?.role === 'POLICE' || get().user?.role === 'ADMIN',
 }));
+

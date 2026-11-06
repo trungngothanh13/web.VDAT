@@ -26,3 +26,4 @@ export function useAudioAlert() {
     setSoundAlertVolume: settings.setSoundAlertVolume,
   };
 }
+

@@ -24,3 +24,4 @@ export interface OverviewStats {
   byCamera: CameraCount[];
   recentViolations: Violation[];
 }
+

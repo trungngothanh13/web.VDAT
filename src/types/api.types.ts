@@ -16,3 +16,4 @@ export interface EvidenceUploadResponse {
   filename: string;
   linkedViolation: string | null;
 }
+

@@ -11,3 +11,4 @@ export function useCameras() {
     refetchInterval: 30000,
   });
 }
+

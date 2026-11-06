@@ -20,3 +20,4 @@ export const violationFilterSchema = z.object({
 });
 
 export type ViolationFilterData = z.infer<typeof violationFilterSchema>;
+

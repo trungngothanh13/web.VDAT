@@ -74,3 +74,4 @@ apiClient.interceptors.response.use(
     return Promise.reject(new ApiError(error.message || 'Unknown request configuration error', 500));
   }
 );
+

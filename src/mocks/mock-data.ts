@@ -187,3 +187,4 @@ export const MOCK_OVERVIEW_STATS: OverviewStats = {
   ],
   recentViolations: MOCK_VIOLATIONS,
 };
+

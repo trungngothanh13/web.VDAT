@@ -89,3 +89,4 @@ State in `web.VDAT` is split into two cleanly separated categories:
 - Role-based capabilities (`permissions` in `src/config/routes.ts`):
   - `ADMIN`: Full access to modify camera zone geometry (`/cameras/:id/zones`) and push updates to AI engine.
   - `POLICE` & `ADMIN`: Review violations (`CONFIRMED` or `DISMISSED`) with review notes.
+

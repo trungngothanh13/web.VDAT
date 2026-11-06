@@ -90,3 +90,4 @@ export function calculatePolygonArea(polygon: Polygon): number {
 
   return Math.abs(area) / 2;
 }
+

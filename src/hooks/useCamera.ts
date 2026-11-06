@@ -11,3 +11,4 @@ export function useCamera(id?: string) {
     staleTime: 20000,
   });
 }
+

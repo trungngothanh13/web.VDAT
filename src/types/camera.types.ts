@@ -53,3 +53,4 @@ export interface UpdateZoneResponse {
   syncedWithAI: boolean;
   message: string;
 }
+

@@ -13,3 +13,4 @@ export function useViolations(params?: ViolationQueryParams) {
     refetchOnWindowFocus: false,
   });
 }
+

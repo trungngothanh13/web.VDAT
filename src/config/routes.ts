@@ -67,3 +67,4 @@ export const permissions = {
   canReviewViolations: (role?: Role | null): boolean => role === 'ADMIN' || role === 'POLICE',
   canManageUsers: (role?: Role | null): boolean => role === 'ADMIN',
 };
+

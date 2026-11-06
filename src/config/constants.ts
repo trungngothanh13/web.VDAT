@@ -109,3 +109,4 @@ export const DEFAULT_APP_SETTINGS = {
   targetStreamFps: 30,
   darkTheme: true,
 };
+
