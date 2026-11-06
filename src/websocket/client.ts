@@ -1,4 +1,5 @@
 import { env } from '../config/env';
+import { STORAGE_KEYS } from '../config/constants';
 import {
   InboundWSMessage,
   StreamConnectionStatus,
@@ -49,6 +50,11 @@ export class VdatWebSocketClient {
 
   public connect(): void {
     if (typeof window === 'undefined') return;
+    const token = localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
+    if (!token) {
+      this.setStatus('disconnected');
+      return;
+    }
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -57,7 +63,9 @@ export class VdatWebSocketClient {
     this.setStatus('connecting');
 
     try {
-      this.ws = new WebSocket(this.url);
+      const separator = this.url.includes('?') ? '&' : '?';
+      const authenticatedUrl = `${this.url}${separator}token=${encodeURIComponent(token)}`;
+      this.ws = new WebSocket(authenticatedUrl);
 
       this.ws.onopen = () => {
         this.setStatus('connected');
@@ -117,6 +125,14 @@ export class VdatWebSocketClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'ping' }));
     }
+  }
+
+  public sendPayload(payload: Record<string, unknown>): boolean {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(payload));
+      return true;
+    }
+    return false;
   }
 
   // Event Subscription Methods

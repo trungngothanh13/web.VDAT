@@ -12,4 +12,5 @@ export * from './useEvidence';
 export * from './useZoneEditor';
 export * from './useAudioAlert';
 export * from './useNotifications';
+export * from './useCameraTransmitter';
 

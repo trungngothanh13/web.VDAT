@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { User, LoginCredentials } from '../types/auth.types';
 import { authApi } from '../api/auth.api';
 import { STORAGE_KEYS } from '../config/constants';
+import { vdatWsClient } from '../websocket/client';
 
 interface AuthStoreState {
   token: string | null;
@@ -44,6 +45,8 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
           isAuthenticated: true,
           error: null,
         });
+        // Verify stored token against backend /api/auth/me
+        void get().fetchMe();
       } catch {
         localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
         localStorage.removeItem(STORAGE_KEYS.USER_DATA);
@@ -75,6 +78,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
         error: null,
       });
 
+      vdatWsClient.reconnect();
       return user;
     } catch (err: any) {
       const message = err.message || 'Login failed';
@@ -84,6 +88,7 @@ export const useAuthStore = create<AuthStoreState>((set, get) => ({
   },
 
   logout: () => {
+    vdatWsClient.disconnect();
     if (typeof window !== 'undefined') {
       localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
       localStorage.removeItem(STORAGE_KEYS.USER_DATA);

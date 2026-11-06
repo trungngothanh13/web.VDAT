@@ -3,10 +3,11 @@ import { cameraApi } from '../api/camera.api';
 
 export const CAMERAS_QUERY_KEY = 'cameras';
 
-export function useCameras() {
+export function useCameras(enabled: boolean = true) {
   return useQuery({
     queryKey: [CAMERAS_QUERY_KEY],
     queryFn: () => cameraApi.listCameras(),
+    enabled,
     staleTime: 15000,
     refetchInterval: 30000,
   });

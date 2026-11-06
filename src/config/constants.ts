@@ -100,6 +100,9 @@ export const getLightConfig = (state?: TrafficLightState) => {
   return LIGHT_STATE_CONFIG[normalized] || LIGHT_STATE_CONFIG.unknown;
 };
 
+export const DEFAULT_CAMERA_WIDTH = 854;
+export const DEFAULT_CAMERA_HEIGHT = 480;
+
 export const DEFAULT_APP_SETTINGS = {
   soundAlertsEnabled: true,
   soundAlertVolume: 0.7, // 0.0 - 1.0
