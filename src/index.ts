@@ -29,6 +29,6 @@ export * from './schemas';
 // 8. Utility Functions (Formatters, Geometry Math, Sound, Notifications, CSV/JSON Export)
 export * from './utils';
 
-// 9. Mock Data & Offline Simulator
-export * from './mocks';
-
+// 9. Query Client & Root Application Component
+export * from './lib/query-client';
+export * from './App';

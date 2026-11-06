@@ -66,9 +66,11 @@ src/
 │   ├── useAudioAlert.ts    # Synthesized Web Audio API red-light alert tone
 │   └── useNotifications.ts # HTML5 Desktop notifications
 ├── schemas/        # Zod validation schemas for forms and request payloads
+├── styles/         # Layered CSS Grid & Container Query layout architecture (dashboard.css)
 ├── types/          # Strict TypeScript interfaces, enums, and data contracts
 ├── utils/          # Geometry math (ray casting), formatters, CSV/JSON exporters
-└── mocks/          # Offline mock data and synthetic WebSocket simulator
+├── App.tsx         # Complete CSS Grid surveillance & officer review dashboard UI
+└── main.tsx        # React application entrypoint
 ```
 
 ---
@@ -238,22 +240,6 @@ export function ZoneEditor({ cameraId }: { cameraId: string }) {
     </div>
   );
 }
-```
-
----
-
-## 🧪 Offline Development with Simulated WebSocket
-
-If backend or AI engines are offline, you can start the built-in simulator:
-
-```ts
-import { mockWsSimulator } from './src';
-
-// Starts 15 FPS simulated live telemetry and periodic violation alerts
-mockWsSimulator.start(
-  (frame) => console.log('Simulated Frame:', frame),
-  (alert) => console.log('Simulated Alert:', alert)
-);
 ```
 
 ---
