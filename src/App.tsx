@@ -522,12 +522,12 @@ export function App() {
         <div className="header-inner">
           <div className="brand-bar">
             <span>VDAT Surveillance Hub</span>
-            <span className={`badge ${stream.latestFrameImage ? 'badge-live' : 'badge-standby'}`}>
-              {stream.latestFrameImage
-                ? 'Live Stream Active'
+            <span className={`badge ${stream.isCameraLive ? 'badge-live' : 'badge-standby'}`}>
+              {stream.isCameraLive
+                ? 'AI Engine Online'
                 : stream.isConnected
-                  ? 'Standby'
-                  : 'Reconnecting'}
+                  ? 'AI Engine Offline'
+                  : 'Backend Disconnected'}
             </span>
           </div>
 
@@ -745,7 +745,7 @@ export function App() {
             )}
 
             <div className="video-viewport">
-              {stream.latestFrameImage ? (
+              {stream.latestFrameImage && stream.isCameraLive ? (
                 <img
                   className="stream-canvas"
                   src={`data:image/jpeg;base64,${stream.latestFrameImage}`}
@@ -754,10 +754,23 @@ export function App() {
               ) : (
                 <div className="stream-placeholder">
                   <div className="spinner" aria-hidden="true" />
-                  <span>Waiting for live camera stream ({stream.selectedCameraId})</span>
-                  <span style={{ fontSize: '0.78rem' }}>
-                    Use <strong>Feed Video File</strong>, <strong>Feed Built-in Footage</strong>, or <strong>Use Laptop Camera</strong> above — or run the Python AI Engine with <code>--ws</code>
-                  </span>
+                  {transmitter.isBroadcasting && !stream.isCameraLive ? (
+                    <>
+                      <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
+                        Feeding &ldquo;{transmitter.sourceLabel}&rdquo; ({transmitter.transmittedFrames} frames sent), but Python AI Detection Module is not connected
+                      </span>
+                      <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
+                        Ensure <code>python main.py --web-input --ws-url ws://localhost:5000/ws/inference --no-video</code> is connected to <code>api.VDAT</code>. If running on ThunderCompute, reverse-forward port 5000 from your laptop (<code>ssh -R 5000:localhost:5000 tnr-0</code>).
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Waiting for AI-annotated camera stream ({stream.selectedCameraId})</span>
+                      <span style={{ fontSize: '0.78rem' }}>
+                        Select a <strong>Camera Input Source</strong> above and ensure the Python AI Detection Module is connected to <code>ws://localhost:5000/ws/inference</code>
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
             </div>

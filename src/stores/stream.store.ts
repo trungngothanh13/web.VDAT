@@ -91,10 +91,26 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       const activeSet = new Set(state.activeCameras);
       if (msg.status === 'ONLINE') {
         activeSet.add(msg.cameraId);
+        return { activeCameras: Array.from(activeSet) };
       } else {
         activeSet.delete(msg.cameraId);
+        const isCurrentCam = msg.cameraId === state.selectedCameraId;
+        return {
+          activeCameras: Array.from(activeSet),
+          ...(isCurrentCam
+            ? {
+                latestFrameImage: null,
+                telemetry: {
+                  vehicle_count: 0,
+                  total_tracked: 0,
+                  violations_count: 0,
+                  fps: 0,
+                  light_state: 'unknown',
+                },
+              }
+            : {}),
+        };
       }
-      return { activeCameras: Array.from(activeSet) };
     });
   },
 
