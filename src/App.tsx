@@ -142,18 +142,16 @@ export function App() {
     const rawLightBox = currentCamera.config.lightBox;
     const lightBoxes: TrafficLightSamplingBox[] = Array.isArray(rawLightBox)
       ? (rawLightBox as TrafficLightSamplingBox[])
-      : [];
+      : DEFAULT_ZONES_FALLBACK.lightBoxes;
 
     zoneEditor.loadGeometry({
-      lanes:
-        currentCamera.config.lanes?.length > 0
-          ? currentCamera.config.lanes
-          : DEFAULT_ZONES_FALLBACK.lanes,
-      intersection:
-        currentCamera.config.intersection?.length > 0
-          ? currentCamera.config.intersection
-          : DEFAULT_ZONES_FALLBACK.intersection,
-      lightBoxes: lightBoxes.length > 0 ? lightBoxes : DEFAULT_ZONES_FALLBACK.lightBoxes,
+      lanes: Array.isArray(currentCamera.config.lanes)
+        ? currentCamera.config.lanes
+        : DEFAULT_ZONES_FALLBACK.lanes,
+      intersection: Array.isArray(currentCamera.config.intersection)
+        ? currentCamera.config.intersection
+        : DEFAULT_ZONES_FALLBACK.intersection,
+      lightBoxes,
     });
   }, [currentCamera, zoneEditor]);
 
@@ -319,12 +317,26 @@ export function App() {
   const handleSaveZones = async () => {
     const targetCameraId = currentCamera?.id || stream.selectedCameraId || 'cam-01';
     setZoneSyncBanner(null);
+
+    // If the user has an unfinished polygon with >= 3 points, automatically commit it before saving
+    let nextLanes = zoneEditor.geometry.lanes;
+    let nextIntersection = zoneEditor.geometry.intersection;
+    if (zoneEditor.activeDrawingPoints.length >= 3) {
+      const committedPolygon = [...zoneEditor.activeDrawingPoints];
+      if (zoneEditor.mode === 'draw_lane') {
+        nextLanes = [...nextLanes, committedPolygon];
+      } else if (zoneEditor.mode === 'draw_intersection') {
+        nextIntersection = committedPolygon;
+      }
+      zoneEditor.finishDrawing();
+    }
+
     try {
       const response = await updateZonesMutation.mutateAsync({
         cameraId: targetCameraId,
         payload: {
-          lanes: zoneEditor.geometry.lanes,
-          intersection: zoneEditor.geometry.intersection,
+          lanes: nextLanes,
+          intersection: nextIntersection,
           lightBox: zoneEditor.geometry.lightBoxes,
         },
       });

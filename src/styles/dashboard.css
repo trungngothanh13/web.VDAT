@@ -2,6 +2,7 @@
 
 @layer theme {
   :root {
+    color-scheme: dark;
     --bg: #090d16;
     --surface-elevated: rgba(15, 23, 42, 0.92);
     --card-bg: rgba(22, 29, 43, 0.8);
@@ -284,6 +285,28 @@
     padding-block: 0.25rem;
     padding-inline: 0.6rem;
     font-size: 0.74rem;
+  }
+
+  select,
+  select.btn {
+    background-color: #0f172a;
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    color-scheme: dark;
+    cursor: pointer;
+  }
+
+  select:hover:not(:disabled),
+  select.btn:hover:not(:disabled) {
+    background-color: #1e293b;
+    border-color: var(--primary-border);
+  }
+
+  select option {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding-block: 0.35rem;
+    padding-inline: 0.5rem;
   }
 
   .btn-success {
