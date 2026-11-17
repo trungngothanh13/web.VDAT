@@ -34,6 +34,13 @@ export interface LiveFrameMessage {
   timestamp: number;
 }
 
+export interface CameraTelemetryMessage {
+  type: 'camera_telemetry';
+  cameraId: string;
+  telemetry: FrameTelemetry;
+  timestamp: number;
+}
+
 export interface ViolationAlertMessage {
   type: 'violation_alert';
   violation: Violation;
@@ -57,6 +64,7 @@ export type InboundWSMessage =
   | ConnectionEstablishedMessage
   | CameraStatusMessage
   | LiveFrameMessage
+  | CameraTelemetryMessage
   | ViolationAlertMessage
   | EvidenceClipUpdateMessage
   | PongMessage;

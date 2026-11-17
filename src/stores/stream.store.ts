@@ -1,19 +1,31 @@
 import { create } from 'zustand';
 import { env } from '../config/env';
+import { vdatWsClient } from '../websocket/client';
 import {
   FrameTelemetry,
   StreamConnectionStatus,
   LiveFrameMessage,
+  CameraTelemetryMessage,
   CameraStatusMessage,
   ConnectionEstablishedMessage,
 } from '../types/websocket.types';
+
+const DEFAULT_TELEMETRY: FrameTelemetry = {
+  vehicle_count: 0,
+  total_tracked: 0,
+  violations_count: 0,
+  fps: 0,
+  light_state: 'unknown',
+};
 
 interface StreamStoreState {
   selectedCameraId: string;
   activeCameras: string[];
   connectionStatus: StreamConnectionStatus;
   latestFrameImage: string | null;
+  latestFrameByCamera: Record<string, string>;
   telemetry: FrameTelemetry;
+  telemetryByCamera: Record<string, FrameTelemetry>;
   streamFps: number;
   isPaused: boolean;
   lastFrameTimestamp: number;
@@ -27,6 +39,7 @@ interface StreamStoreState {
 
   // WebSocket message handlers
   handleLiveFrame: (msg: LiveFrameMessage) => void;
+  handleCameraTelemetry: (msg: CameraTelemetryMessage) => void;
   handleCameraStatus: (msg: CameraStatusMessage) => void;
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => void;
   resetStream: () => void;
@@ -37,31 +50,21 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   activeCameras: [],
   connectionStatus: 'disconnected',
   latestFrameImage: null,
-  telemetry: {
-    vehicle_count: 0,
-    total_tracked: 0,
-    violations_count: 0,
-    fps: 0,
-    light_state: 'unknown',
-  },
+  latestFrameByCamera: {},
+  telemetry: { ...DEFAULT_TELEMETRY },
+  telemetryByCamera: {},
   streamFps: 0,
   isPaused: false,
   lastFrameTimestamp: 0,
 
   setSelectedCamera: (cameraId: string) => {
-    if (get().selectedCameraId !== cameraId) {
-      set({
-        selectedCameraId: cameraId,
-        latestFrameImage: null,
-        telemetry: {
-          vehicle_count: 0,
-          total_tracked: 0,
-          violations_count: 0,
-          fps: 0,
-          light_state: 'unknown',
-        },
-      });
-    }
+    vdatWsClient.sendPayload({ type: 'watch_camera', cameraId });
+    const { latestFrameByCamera, telemetryByCamera } = get();
+    set({
+      selectedCameraId: cameraId,
+      latestFrameImage: latestFrameByCamera[cameraId] ?? null,
+      telemetry: telemetryByCamera[cameraId] ?? { ...DEFAULT_TELEMETRY },
+    });
   },
 
   setConnectionStatus: (status: StreamConnectionStatus) => {
@@ -73,17 +76,43 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   setStreamFps: (fps: number) => set({ streamFps: fps }),
 
   handleLiveFrame: (msg: LiveFrameMessage) => {
-    const { selectedCameraId, isPaused } = get();
+    const { selectedCameraId, isPaused, latestFrameByCamera, telemetryByCamera } = get();
+    const updatedFrames = { ...latestFrameByCamera, [msg.cameraId]: msg.image };
+    const updatedTelemetry = msg.telemetry
+      ? { ...telemetryByCamera, [msg.cameraId]: msg.telemetry }
+      : telemetryByCamera;
 
-    // Only process frames matching the currently active/selected camera
     if (msg.cameraId === selectedCameraId && !isPaused) {
       set({
+        latestFrameByCamera: updatedFrames,
+        telemetryByCamera: updatedTelemetry,
         latestFrameImage: msg.image,
-        telemetry: msg.telemetry || {},
+        telemetry: msg.telemetry || { ...DEFAULT_TELEMETRY },
         lastFrameTimestamp: msg.timestamp || Date.now(),
         streamFps: msg.telemetry?.fps ?? get().streamFps,
       });
+    } else {
+      set({
+        latestFrameByCamera: updatedFrames,
+        telemetryByCamera: updatedTelemetry,
+      });
     }
+  },
+
+  handleCameraTelemetry: (msg: CameraTelemetryMessage) => {
+    if (!msg.telemetry) return;
+    set((state) => {
+      const updatedTelemetry = { ...state.telemetryByCamera, [msg.cameraId]: msg.telemetry };
+      return {
+        telemetryByCamera: updatedTelemetry,
+        ...(msg.cameraId === state.selectedCameraId && !state.isPaused
+          ? {
+              telemetry: msg.telemetry,
+              streamFps: msg.telemetry.fps ?? state.streamFps,
+            }
+          : {}),
+      };
+    });
   },
 
   handleCameraStatus: (msg: CameraStatusMessage) => {
@@ -94,19 +123,16 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
         return { activeCameras: Array.from(activeSet) };
       } else {
         activeSet.delete(msg.cameraId);
+        const updatedFrames = { ...state.latestFrameByCamera };
+        delete updatedFrames[msg.cameraId];
         const isCurrentCam = msg.cameraId === state.selectedCameraId;
         return {
           activeCameras: Array.from(activeSet),
+          latestFrameByCamera: updatedFrames,
           ...(isCurrentCam
             ? {
                 latestFrameImage: null,
-                telemetry: {
-                  vehicle_count: 0,
-                  total_tracked: 0,
-                  violations_count: 0,
-                  fps: 0,
-                  light_state: 'unknown',
-                },
+                telemetry: { ...DEFAULT_TELEMETRY },
               }
             : {}),
         };
@@ -115,6 +141,8 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   },
 
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => {
+    const selectedCameraId = get().selectedCameraId;
+    vdatWsClient.sendPayload({ type: 'watch_camera', cameraId: selectedCameraId });
     set({
       activeCameras: msg.activeCameras || [],
     });
@@ -123,13 +151,9 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   resetStream: () => {
     set({
       latestFrameImage: null,
-      telemetry: {
-        vehicle_count: 0,
-        total_tracked: 0,
-        violations_count: 0,
-        fps: 0,
-        light_state: 'unknown',
-      },
+      latestFrameByCamera: {},
+      telemetry: { ...DEFAULT_TELEMETRY },
+      telemetryByCamera: {},
     });
   },
 }));

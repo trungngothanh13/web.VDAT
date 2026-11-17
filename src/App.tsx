@@ -7,10 +7,11 @@ import {
   useReviewViolation,
   useOverviewStats,
   useCameras,
+  useCreateCamera,
   useUpdateZones,
   useZoneEditor,
   useAudioAlert,
-  useCameraTransmitter,
+  useMultiCameraTransmitter,
 } from './hooks';
 import { evidenceApi } from './api/evidence.api';
 import { exportViolationsToCsv } from './utils/export';
@@ -83,10 +84,18 @@ export function App() {
 
   const [activeTab, setActiveTab] = useState<'monitor' | 'zones' | 'analytics'>('monitor');
   const [statusFilter, setStatusFilter] = useState<ViolationStatus | undefined>(undefined);
+  const [cameraFilter, setCameraFilter] = useState<string | undefined>(undefined);
   const [activeEvidence, setActiveEvidence] = useState<{
     violation: Violation;
     mediaTab: 'video' | 'snapshot';
   } | null>(null);
+
+  // Multi-camera registration state (Admin)
+  const [showAddCamera, setShowAddCamera] = useState(false);
+  const [newCamId, setNewCamId] = useState('');
+  const [newCamName, setNewCamName] = useState('');
+  const [newCamLocation, setNewCamLocation] = useState('');
+  const [addCameraError, setAddCameraError] = useState<string | null>(null);
 
   // Sign-In Form State
   const [email, setEmail] = useState('admin@vdat.local');
@@ -100,8 +109,11 @@ export function App() {
 
   // Protected hooks only connect/fetch when authenticated
   const stream = useLiveStream({ autoConnect: auth.isAuthenticated });
-  const transmitter = useCameraTransmitter(stream.selectedCameraId || 'cam-01');
-  const videoFileInputRef = useRef<HTMLInputElement>(null);
+  const transmitters = useMultiCameraTransmitter();
+  const focusedCameraId = stream.selectedCameraId || 'cam-01';
+  const focusedChannel = transmitters.getChannel(focusedCameraId);
+  const tileFileInputsRef = useRef<Record<string, HTMLInputElement | null>>({});
+  const focusedFileInputRef = useRef<HTMLInputElement>(null);
   const alerts = useViolationAlerts();
   const audio = useAudioAlert();
 
@@ -110,12 +122,14 @@ export function App() {
       page: 1,
       limit: 50,
       status: statusFilter,
+      cameraId: cameraFilter,
     },
     auth.isAuthenticated
   );
   const reviewMutation = useReviewViolation();
   const statsQuery = useOverviewStats(15000, auth.isAuthenticated);
   const camerasQuery = useCameras(auth.isAuthenticated);
+  const createCameraMutation = useCreateCamera();
   const updateZonesMutation = useUpdateZones();
 
   const zoneEditor = useZoneEditor(DEFAULT_ZONES_FALLBACK);
@@ -491,12 +505,44 @@ export function App() {
 
   for (const v of [...alerts.liveAlerts, ...storedViolations]) {
     if (!seenIds.has(v.id)) {
-      if (!statusFilter || v.status === statusFilter) {
+      const matchesStatus = !statusFilter || v.status === statusFilter;
+      const matchesCamera = !cameraFilter || v.cameraId === cameraFilter;
+      if (matchesStatus && matchesCamera) {
         seenIds.add(v.id);
         mergedViolations.push(v);
       }
     }
   }
+
+  const cameraSlots =
+    camerasQuery.data && camerasQuery.data.length > 0
+      ? camerasQuery.data
+      : [
+          { id: 'cam-01', name: 'Camera 01 (Primary)', location: 'Intersection 1', isActive: false, createdAt: '', updatedAt: '' },
+          { id: 'cam-02', name: 'Camera 02', location: 'Intersection 2', isActive: false, createdAt: '', updatedAt: '' },
+          { id: 'cam-03', name: 'Camera 03', location: 'Intersection 3', isActive: false, createdAt: '', updatedAt: '' },
+        ];
+
+  const handleCreateCamera = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAddCameraError(null);
+    const id = newCamId.trim();
+    const name = newCamName.trim() || `Camera ${id}`;
+    const location = newCamLocation.trim() || 'Intersection';
+    if (!id) {
+      setAddCameraError('Camera ID is required (e.g. cam-04).');
+      return;
+    }
+    try {
+      await createCameraMutation.mutateAsync({ id, name, location });
+      setNewCamId('');
+      setNewCamName('');
+      setNewCamLocation('');
+      setShowAddCamera(false);
+    } catch (err: any) {
+      setAddCameraError(err?.response?.data?.error || err.message || 'Failed to add camera.');
+    }
+  };
 
   const lightCfg = getLightConfig(stream.telemetry.light_state);
 
@@ -574,230 +620,476 @@ export function App() {
 
       {activeTab === 'monitor' && (
         <main className="workspace-grid">
-          {/* Left Column: Live Stream Viewport + Telemetry HUD */}
-          <section className="card card-stream" aria-labelledby="stream-title">
-            <div className="card-header">
-              <span id="stream-title">
-                Live Camera Stream ({stream.selectedCameraId})
-                {transmitter.isBroadcasting ? ` — ${transmitter.sourceLabel}` : ''}
-              </span>
-              <div className="toolbar-actions">
-                <span className="badge" style={{ color: lightCfg.color }}>
-                  Signal: {lightCfg.label}
+          {/* Left Column: Primary Focused AI Stream + Multi-Source Preview Wall */}
+          <div className="primary-column">
+            <section className="card card-stream" aria-labelledby="stream-title">
+              <div className="card-header">
+                <span id="stream-title">
+                  Focused AI Stream ({focusedCameraId})
+                  {focusedChannel.isBroadcasting ? ` — ${focusedChannel.sourceLabel}` : ''}
                 </span>
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={stream.togglePause}
-                >
-                  {stream.isPaused ? 'Resume Feed' : 'Pause Feed'}
-                </button>
-              </div>
-            </div>
-
-            {/* Camera Input Source Selector: Choose Video Footage or Laptop Camera Straight from Web */}
-            <div
-              className="filter-bar"
-              role="region"
-              aria-label="Camera stream input source"
-              style={{ justifyContent: 'space-between', alignItems: 'center' }}
-            >
-              <div className="toolbar-actions">
-                <label
-                  htmlFor="camera-source-select"
-                  style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)' }}
-                >
-                  Camera Input Source:
-                </label>
-                <input
-                  ref={videoFileInputRef}
-                  type="file"
-                  accept="video/*"
-                  style={{ display: 'none' }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      void transmitter.startVideoFileStream(file);
-                      e.target.value = '';
-                    }
-                  }}
-                />
-                <select
-                  id="camera-source-select"
-                  className="btn btn-compact"
-                  value={transmitter.sourcePreset}
-                  onChange={(e) => {
-                    const val = e.target.value as
-                      | 'test_1.mp4'
-                      | 'test_2.mp4'
-                      | 'test_3.mp4'
-                      | 'custom_file'
-                      | 'laptop_webcam';
-                    transmitter.setSourcePreset(val);
-                    if (val === 'test_1.mp4' || val === 'test_2.mp4' || val === 'test_3.mp4') {
-                      void transmitter.startSampleVideoStream(val);
-                    } else if (val === 'laptop_webcam') {
-                      void transmitter.startLaptopCameraStream();
-                    } else if (val === 'custom_file') {
-                      videoFileInputRef.current?.click();
-                    }
-                  }}
-                >
-                  <option value="test_1.mp4">Built-in Footage: test_1.mp4 (Intersection 1)</option>
-                  <option value="test_2.mp4">Built-in Footage: test_2.mp4 (Intersection 2)</option>
-                  <option value="test_3.mp4">Built-in Footage: test_3.mp4 (Intersection 3)</option>
-                  <option value="custom_file">Custom Video File (From Computer...)</option>
-                  <option value="laptop_webcam">Laptop Camera (Hardware Webcam)</option>
-                </select>
-
-                <button
-                  type="button"
-                  className="btn btn-compact btn-active"
-                  onClick={() => {
-                    const p = transmitter.sourcePreset;
-                    if (p === 'test_1.mp4' || p === 'test_2.mp4' || p === 'test_3.mp4') {
-                      void transmitter.startSampleVideoStream(p);
-                    } else if (p === 'laptop_webcam') {
-                      void transmitter.startLaptopCameraStream();
-                    } else {
-                      videoFileInputRef.current?.click();
-                    }
-                  }}
-                >
-                  {transmitter.isBroadcasting ? 'Restart Source' : 'Start Selected Source'}
-                </button>
-
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={() => videoFileInputRef.current?.click()}
-                >
-                  Browse Video File...
-                </button>
-
-                {transmitter.sourcePreset === 'laptop_webcam' &&
-                  transmitter.webcamDevices.length > 0 && (
-                    <select
-                      aria-label="Select laptop camera device"
-                      className="btn btn-compact"
-                      value={transmitter.selectedDeviceId}
-                      onChange={(e) => {
-                        transmitter.setSelectedDeviceId(e.target.value);
-                        void transmitter.startLaptopCameraStream(e.target.value);
-                      }}
-                    >
-                      {transmitter.webcamDevices.map((dev) => (
-                        <option key={dev.deviceId} value={dev.deviceId}>
-                          {dev.label}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-              </div>
-
-              <div className="toolbar-actions">
-                <label
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.35rem',
-                    fontSize: '0.74rem',
-                    color: 'var(--text-muted)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={transmitter.loopVideo}
-                    onChange={(e) => transmitter.setLoopVideo(e.target.checked)}
-                  />
-                  Loop Video
-                </label>
-                {transmitter.isBroadcasting && (
-                  <>
-                    <span className="badge badge-live">
-                      Streaming ({transmitter.transmittedFrames} frames)
-                    </span>
+                <div className="toolbar-actions">
+                  <span className="badge" style={{ color: lightCfg.color }}>
+                    Signal: {lightCfg.label}
+                  </span>
+                  {auth.isAdmin && (
                     <button
                       type="button"
-                      className="btn btn-compact btn-danger"
-                      onClick={transmitter.stopBroadcast}
+                      className="btn btn-compact"
+                      onClick={() => setActiveTab('zones')}
                     >
-                      Stop Source
+                      Edit Zones
                     </button>
-                  </>
-                )}
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={stream.togglePause}
+                  >
+                    {stream.isPaused ? 'Resume Feed' : 'Pause Feed'}
+                  </button>
+                </div>
               </div>
-            </div>
 
-            {transmitter.error && (
+              {/* Camera Input Source Selector for Currently Focused Camera */}
               <div
-                style={{
-                  padding: '0.45rem 1rem',
-                  background: 'var(--danger-soft)',
-                  borderBlockEnd: '1px solid var(--danger-border)',
-                  color: 'var(--danger-text)',
-                  fontSize: '0.78rem',
-                }}
+                className="filter-bar"
+                role="region"
+                aria-label="Focused camera input source"
+                style={{ justifyContent: 'space-between', alignItems: 'center' }}
               >
-                {transmitter.error}
-              </div>
-            )}
+                <div className="toolbar-actions">
+                  <label
+                    htmlFor="camera-source-select"
+                    style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)' }}
+                  >
+                    Camera Input Source ({focusedCameraId}):
+                  </label>
+                  <input
+                    ref={focusedFileInputRef}
+                    type="file"
+                    accept="video/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        void transmitters.startVideoFileStream(focusedCameraId, file);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                  <select
+                    id="camera-source-select"
+                    className="btn btn-compact"
+                    value={focusedChannel.sourcePreset}
+                    onChange={(e) => {
+                      const val = e.target.value as
+                        | 'test_1.mp4'
+                        | 'test_2.mp4'
+                        | 'test_3.mp4'
+                        | 'custom_file'
+                        | 'laptop_webcam';
+                      transmitters.setSourcePreset(focusedCameraId, val);
+                      if (val === 'test_1.mp4' || val === 'test_2.mp4' || val === 'test_3.mp4') {
+                        void transmitters.startSampleVideoStream(focusedCameraId, val);
+                      } else if (val === 'laptop_webcam') {
+                        void transmitters.startLaptopCameraStream(focusedCameraId);
+                      } else if (val === 'custom_file') {
+                        focusedFileInputRef.current?.click();
+                      }
+                    }}
+                  >
+                    <option value="test_1.mp4">Built-in Footage: test_1.mp4 (Intersection 1)</option>
+                    <option value="test_2.mp4">Built-in Footage: test_2.mp4 (Intersection 2)</option>
+                    <option value="test_3.mp4">Built-in Footage: test_3.mp4 (Intersection 3)</option>
+                    <option value="custom_file">Custom Video File (From Computer...)</option>
+                    <option value="laptop_webcam">Laptop Camera (Hardware Webcam)</option>
+                  </select>
 
-            <div className="video-viewport">
-              {stream.latestFrameImage && stream.isCameraLive ? (
-                <img
-                  className="stream-canvas"
-                  src={`data:image/jpeg;base64,${stream.latestFrameImage}`}
-                  alt={`Live feed from ${stream.selectedCameraId}`}
-                />
-              ) : (
-                <div className="stream-placeholder">
-                  <div className="spinner" aria-hidden="true" />
-                  {transmitter.isBroadcasting && !stream.isCameraLive ? (
+                  <button
+                    type="button"
+                    className="btn btn-compact btn-active"
+                    onClick={() => {
+                      const p = focusedChannel.sourcePreset;
+                      if (p === 'test_1.mp4' || p === 'test_2.mp4' || p === 'test_3.mp4') {
+                        void transmitters.startSampleVideoStream(focusedCameraId, p);
+                      } else if (p === 'laptop_webcam') {
+                        void transmitters.startLaptopCameraStream(focusedCameraId);
+                      } else {
+                        focusedFileInputRef.current?.click();
+                      }
+                    }}
+                  >
+                    {focusedChannel.isBroadcasting ? 'Restart Source' : 'Start Selected Source'}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={() => focusedFileInputRef.current?.click()}
+                  >
+                    Browse Video File...
+                  </button>
+
+                  {focusedChannel.sourcePreset === 'laptop_webcam' &&
+                    transmitters.webcamDevices.length > 0 && (
+                      <select
+                        aria-label="Select laptop camera device"
+                        className="btn btn-compact"
+                        value={focusedChannel.selectedDeviceId}
+                        onChange={(e) => {
+                          transmitters.setSelectedDeviceId(focusedCameraId, e.target.value);
+                          void transmitters.startLaptopCameraStream(
+                            focusedCameraId,
+                            e.target.value
+                          );
+                        }}
+                      >
+                        {transmitters.webcamDevices.map((dev) => (
+                          <option key={dev.deviceId} value={dev.deviceId}>
+                            {dev.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                </div>
+
+                <div className="toolbar-actions">
+                  <label
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      fontSize: '0.74rem',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={focusedChannel.loopVideo}
+                      onChange={(e) =>
+                        transmitters.setLoopVideo(focusedCameraId, e.target.checked)
+                      }
+                    />
+                    Loop Video
+                  </label>
+                  {focusedChannel.isBroadcasting && (
                     <>
-                      <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
-                        Feeding &ldquo;{transmitter.sourceLabel}&rdquo; ({transmitter.transmittedFrames} frames sent), but Python AI Detection Module is not connected
+                      <span className="badge badge-live">
+                        Streaming ({focusedChannel.transmittedFrames} frames)
                       </span>
-                      <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
-                        Ensure <code>python main.py --web-input --ws-url ws://localhost:5000/ws/inference --no-video</code> is connected to <code>api.VDAT</code>. If running on ThunderCompute, reverse-forward port 5000 from your laptop (<code>ssh -R 5000:localhost:5000 tnr-0</code>).
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Waiting for AI-annotated camera stream ({stream.selectedCameraId})</span>
-                      <span style={{ fontSize: '0.78rem' }}>
-                        Select a <strong>Camera Input Source</strong> above and ensure the Python AI Detection Module is connected to <code>ws://localhost:5000/ws/inference</code>
-                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-compact btn-danger"
+                        onClick={() => transmitters.stopBroadcast(focusedCameraId)}
+                      >
+                        Stop Source
+                      </button>
                     </>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
 
-            <div className="hud-wrapper">
-              <div className="hud-bar">
-                <div className="stat-box">
-                  <div className="stat-label">Active Vehicles</div>
-                  <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
+              {focusedChannel.error && (
+                <div
+                  style={{
+                    padding: '0.45rem 1rem',
+                    background: 'var(--danger-soft)',
+                    borderBlockEnd: '1px solid var(--danger-border)',
+                    color: 'var(--danger-text)',
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  {focusedChannel.error}
                 </div>
-                <div className="stat-box">
-                  <div className="stat-label">Total Tracked</div>
-                  <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
-                </div>
-                <div className="stat-box">
-                  <div className="stat-label">Violation Count</div>
-                  <div className="stat-value" style={{ color: 'var(--danger)' }}>
-                    {stream.telemetry.violations_count ?? mergedViolations.length}
+              )}
+
+              <div className="video-viewport">
+                {stream.latestFrameImage && stream.isCameraLive ? (
+                  <img
+                    className="stream-canvas"
+                    src={`data:image/jpeg;base64,${stream.latestFrameImage}`}
+                    alt={`Live AI feed from ${focusedCameraId}`}
+                  />
+                ) : (
+                  <div className="stream-placeholder">
+                    <div className="spinner" aria-hidden="true" />
+                    {focusedChannel.isBroadcasting && !stream.isCameraLive ? (
+                      <>
+                        <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
+                          Feeding &ldquo;{focusedChannel.sourceLabel}&rdquo; (
+                          {focusedChannel.transmittedFrames} frames sent), but AI session for{' '}
+                          <code>{focusedCameraId}</code> is not connected
+                        </span>
+                        <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
+                          Start the multi-camera AI engine with{' '}
+                          <code>
+                            python main.py --web-input --cameras {cameraSlots.map((c) => c.id).join(' ')} --ws-url ws://localhost:5000/ws/inference --no-video
+                          </code>
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Waiting for AI-annotated camera stream ({focusedCameraId})</span>
+                        <span style={{ fontSize: '0.78rem' }}>
+                          Start a source on any camera slot below or above while the shared-YOLO AI module is connected
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="hud-wrapper">
+                <div className="hud-bar">
+                  <div className="stat-box">
+                    <div className="stat-label">Active Vehicles</div>
+                    <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Total Tracked</div>
+                    <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Violation Count</div>
+                    <div className="stat-value" style={{ color: 'var(--danger)' }}>
+                      {stream.telemetry.violations_count ?? mergedViolations.length}
+                    </div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Stream FPS</div>
+                    <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
                   </div>
                 </div>
-                <div className="stat-box">
-                  <div className="stat-label">Stream FPS</div>
-                  <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
+              </div>
+            </section>
+
+            {/* Multi-Source Camera Preview Wall (Raw Previews + Background AI Processing) */}
+            <section className="card" aria-labelledby="camera-wall-title">
+              <div className="card-header">
+                <span id="camera-wall-title">
+                  Multi-Camera Source Wall ({cameraSlots.length} Slots •{' '}
+                  {stream.activeCameras.length} AI Online)
+                </span>
+                <div className="toolbar-actions">
+                  {auth.isAdmin && (
+                    <button
+                      type="button"
+                      className="btn btn-compact btn-active"
+                      onClick={() => setShowAddCamera((prev) => !prev)}
+                    >
+                      {showAddCamera ? 'Cancel' : '+ Add Camera Slot'}
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
-          </section>
+
+              {showAddCamera && auth.isAdmin && (
+                <form className="add-camera-form" onSubmit={handleCreateCamera}>
+                  <label htmlFor="new-cam-id" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                    ID:
+                  </label>
+                  <input
+                    id="new-cam-id"
+                    type="text"
+                    className="add-camera-input"
+                    placeholder="cam-04"
+                    value={newCamId}
+                    onChange={(e) => setNewCamId(e.target.value)}
+                    required
+                  />
+                  <label htmlFor="new-cam-name" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                    Name:
+                  </label>
+                  <input
+                    id="new-cam-name"
+                    type="text"
+                    className="add-camera-input"
+                    placeholder="Intersection 4"
+                    value={newCamName}
+                    onChange={(e) => setNewCamName(e.target.value)}
+                    required
+                  />
+                  <label htmlFor="new-cam-loc" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                    Location:
+                  </label>
+                  <input
+                    id="new-cam-loc"
+                    type="text"
+                    className="add-camera-input"
+                    placeholder="District 1"
+                    value={newCamLocation}
+                    onChange={(e) => setNewCamLocation(e.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="btn btn-compact btn-success"
+                    disabled={createCameraMutation.isPending}
+                  >
+                    {createCameraMutation.isPending ? 'Adding...' : 'Register Slot'}
+                  </button>
+                  {addCameraError && (
+                    <span style={{ color: 'var(--danger-text)', fontSize: '0.74rem' }}>
+                      {addCameraError}
+                    </span>
+                  )}
+                </form>
+              )}
+
+              <div className="camera-wall-grid">
+                {cameraSlots.map((cam) => {
+                  const ch = transmitters.getChannel(cam.id);
+                  const camTelemetry = stream.telemetryByCamera[cam.id];
+                  const isAiOnline = stream.activeCameras.includes(cam.id);
+                  const isFocused = focusedCameraId === cam.id;
+                  const camLightCfg = getLightConfig(camTelemetry?.light_state);
+                  const selectId = `tile-source-${cam.id}`;
+
+                  return (
+                    <article
+                      key={cam.id}
+                      className={`camera-tile ${isFocused ? 'camera-tile-focused' : ''}`}
+                    >
+                      <div className="camera-tile-media">
+                        <canvas
+                          ref={(el) => transmitters.bindPreviewCanvas(cam.id, el)}
+                          width={427}
+                          height={240}
+                          className="camera-tile-canvas"
+                        />
+                        {!ch.isBroadcasting && (
+                          <div className="camera-tile-placeholder">
+                            <span>
+                              No active source on <strong>{cam.id}</strong>
+                              <br />
+                              Pick a source below to feed the AI layer
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      <header className="camera-tile-header">
+                        <h3 className="camera-tile-title">
+                          {cam.id} — {cam.name}
+                        </h3>
+                        <span className={`badge ${isAiOnline ? 'badge-live' : 'badge-standby'}`}>
+                          {isAiOnline ? 'AI Online' : 'AI Offline'}
+                        </span>
+                      </header>
+
+                      <div className="camera-tile-telemetry">
+                        <span>Vehicles: {camTelemetry?.vehicle_count ?? 0}</span>
+                        <span>Tracked: {camTelemetry?.total_tracked ?? 0}</span>
+                        <span>Violations: {camTelemetry?.violations_count ?? cam.violationCount ?? 0}</span>
+                        <span style={{ color: camLightCfg.color }}>{camLightCfg.label}</span>
+                      </div>
+
+                      <footer className="camera-tile-footer">
+                        <div className="camera-tile-controls">
+                          <label htmlFor={selectId} style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                            Source:
+                          </label>
+                          <input
+                            ref={(el) => {
+                              tileFileInputsRef.current[cam.id] = el;
+                            }}
+                            type="file"
+                            accept="video/*"
+                            style={{ display: 'none' }}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                void transmitters.startVideoFileStream(cam.id, file);
+                                e.target.value = '';
+                              }
+                            }}
+                          />
+                          <select
+                            id={selectId}
+                            className="btn btn-compact"
+                            value={ch.sourcePreset}
+                            onChange={(e) => {
+                              const val = e.target.value as
+                                | 'test_1.mp4'
+                                | 'test_2.mp4'
+                                | 'test_3.mp4'
+                                | 'custom_file'
+                                | 'laptop_webcam';
+                              transmitters.setSourcePreset(cam.id, val);
+                              if (val === 'custom_file') {
+                                tileFileInputsRef.current[cam.id]?.click();
+                              } else if (val === 'laptop_webcam') {
+                                void transmitters.startLaptopCameraStream(cam.id);
+                              } else {
+                                void transmitters.startSampleVideoStream(cam.id, val);
+                              }
+                            }}
+                          >
+                            <option value="test_1.mp4">test_1.mp4</option>
+                            <option value="test_2.mp4">test_2.mp4</option>
+                            <option value="test_3.mp4">test_3.mp4</option>
+                            <option value="custom_file">Custom File...</option>
+                            <option value="laptop_webcam">Laptop Webcam</option>
+                          </select>
+                        </div>
+
+                        <div className="camera-tile-controls">
+                          {ch.isBroadcasting ? (
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-danger"
+                              onClick={() => transmitters.stopBroadcast(cam.id)}
+                            >
+                              Stop
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-success"
+                              onClick={() => {
+                                const p = ch.sourcePreset;
+                                if (p === 'custom_file') {
+                                  tileFileInputsRef.current[cam.id]?.click();
+                                } else if (p === 'laptop_webcam') {
+                                  void transmitters.startLaptopCameraStream(cam.id);
+                                } else {
+                                  void transmitters.startSampleVideoStream(cam.id, p);
+                                }
+                              }}
+                            >
+                              Start Feed
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            className={`btn btn-compact ${isFocused ? 'btn-active' : ''}`}
+                            onClick={() => stream.setSelectedCamera(cam.id)}
+                          >
+                            {isFocused ? 'In AI Focus' : 'Inspect AI'}
+                          </button>
+
+                          {auth.isAdmin && (
+                            <button
+                              type="button"
+                              className="btn btn-compact"
+                              onClick={() => {
+                                stream.setSelectedCamera(cam.id);
+                                setActiveTab('zones');
+                              }}
+                            >
+                              Zones
+                            </button>
+                          )}
+                        </div>
+                      </footer>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
 
           {/* Right Column: Violation Evidence Stream & Review */}
           <aside className="card card-sidebar" aria-labelledby="proofs-title">
@@ -822,20 +1114,41 @@ export function App() {
               </div>
             </div>
 
-            <div className="filter-bar" role="group" aria-label="Filter violations by status">
-              {(['ALL', 'PENDING_REVIEW', 'CONFIRMED', 'DISMISSED'] as const).map((st) => {
-                const isSelected = (st === 'ALL' && !statusFilter) || st === statusFilter;
-                return (
-                  <button
-                    key={st}
-                    type="button"
-                    className={`btn btn-compact ${isSelected ? 'btn-active' : ''}`}
-                    onClick={() => setStatusFilter(st === 'ALL' ? undefined : st)}
-                  >
-                    {st === 'ALL' ? 'All' : VIOLATION_STATUS_CONFIG[st].label}
-                  </button>
-                );
-              })}
+            <div className="filter-bar" role="group" aria-label="Filter violations by status and camera" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <div className="toolbar-actions">
+                {(['ALL', 'PENDING_REVIEW', 'CONFIRMED', 'DISMISSED'] as const).map((st) => {
+                  const isSelected = (st === 'ALL' && !statusFilter) || st === statusFilter;
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      className={`btn btn-compact ${isSelected ? 'btn-active' : ''}`}
+                      onClick={() => setStatusFilter(st === 'ALL' ? undefined : st)}
+                    >
+                      {st === 'ALL' ? 'All' : VIOLATION_STATUS_CONFIG[st].label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="toolbar-actions">
+                <label htmlFor="violation-camera-filter" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                  Camera:
+                </label>
+                <select
+                  id="violation-camera-filter"
+                  className="btn btn-compact"
+                  value={cameraFilter ?? 'ALL'}
+                  onChange={(e) => setCameraFilter(e.target.value === 'ALL' ? undefined : e.target.value)}
+                >
+                  <option value="ALL">All Cameras</option>
+                  {cameraSlots.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="evidence-feed">
@@ -862,6 +1175,9 @@ export function App() {
                       />
                       <div className="violation-info">
                         <div className="violation-title">
+                          <span className="badge badge-standby" style={{ fontSize: '0.62rem' }}>
+                            {v.cameraId}
+                          </span>
                           <span>Track #{v.trackId}</span>
                           <span style={{ textTransform: 'capitalize' }}>{v.vehicleClass}</span>
                           <span
@@ -940,9 +1256,27 @@ export function App() {
           <section className="card card-stream" aria-labelledby="zone-editor-title">
             <div className="card-header">
               <span id="zone-editor-title">
-                Interactive Camera Zone Editor ({currentCamera?.id ?? 'cam-01'} — 854x480)
+                Interactive Camera Zone Editor ({focusedCameraId} — 854x480)
               </span>
               <div className="toolbar-actions">
+                <label htmlFor="zone-camera-select" style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                  Camera:
+                </label>
+                <select
+                  id="zone-camera-select"
+                  className="btn btn-compact"
+                  value={focusedCameraId}
+                  onChange={(e) => {
+                    initializedCameraConfigRef.current = null;
+                    stream.setSelectedCamera(e.target.value);
+                  }}
+                >
+                  {cameraSlots.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id} ({c.name})
+                    </option>
+                  ))}
+                </select>
                 <button
                   type="button"
                   className={`btn btn-compact ${!useLiveFrameInEditor ? 'btn-active' : ''}`}
@@ -1023,11 +1357,11 @@ export function App() {
               <img
                 className="stream-canvas"
                 src={
-                  useLiveFrameInEditor && stream.latestFrameImage
-                    ? `data:image/jpeg;base64,${stream.latestFrameImage}`
-                    : '/cam-01-reference.jpg'
+                  useLiveFrameInEditor && stream.latestFrameByCamera[focusedCameraId]
+                    ? `data:image/jpeg;base64,${stream.latestFrameByCamera[focusedCameraId]}`
+                    : transmitters.getChannelSnapshot(focusedCameraId) || '/cam-01-reference.jpg'
                 }
-                alt="Camera reference frame for zone configuration"
+                alt={`Reference frame for ${focusedCameraId} zone configuration`}
               />
               <canvas
                 ref={zoneCanvasRef}

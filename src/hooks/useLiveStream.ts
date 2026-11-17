@@ -37,6 +37,11 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.handleLiveFrame(msg);
     });
 
+    // Subscribe to lightweight telemetry for all cameras
+    const unsubTelemetry = vdatWsClient.onCameraTelemetry((msg) => {
+      store.handleCameraTelemetry(msg);
+    });
+
     // Subscribe to camera status updates (online / offline)
     const unsubCamStatus = vdatWsClient.onCameraStatus((msg) => {
       store.handleCameraStatus(msg);
@@ -47,7 +52,7 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.handleConnectionEstablished(msg);
     });
 
-    unsubscribeRefs.current = [unsubStatus, unsubFrame, unsubCamStatus, unsubConn];
+    unsubscribeRefs.current = [unsubStatus, unsubFrame, unsubTelemetry, unsubCamStatus, unsubConn];
 
     return () => {
       for (const unsub of unsubscribeRefs.current) {
@@ -66,7 +71,9 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     isConnected: store.connectionStatus === 'connected',
     isCameraLive,
     latestFrameImage: store.latestFrameImage,
+    latestFrameByCamera: store.latestFrameByCamera,
     telemetry: store.telemetry,
+    telemetryByCamera: store.telemetryByCamera,
     streamFps: store.streamFps,
     isPaused: store.isPaused,
     lastFrameTimestamp: store.lastFrameTimestamp,

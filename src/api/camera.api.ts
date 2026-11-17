@@ -19,6 +19,14 @@ export const cameraApi = {
   },
 
   /**
+   * Register a new camera slot (Admin only)
+   */
+  async createCamera(payload: { id: string; name: string; location?: string }): Promise<Camera> {
+    const { data } = await apiClient.post<Camera>('/api/cameras', payload);
+    return data;
+  },
+
+  /**
    * Update lane and intersection polygon zones (Admin only)
    * Automatically pushes update to AI engine on ThunderCompute
    */

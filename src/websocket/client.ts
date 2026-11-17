@@ -4,6 +4,7 @@ import {
   InboundWSMessage,
   StreamConnectionStatus,
   LiveFrameMessage,
+  CameraTelemetryMessage,
   ViolationAlertMessage,
   EvidenceClipUpdateMessage,
   CameraStatusMessage,
@@ -25,6 +26,7 @@ export class VdatWebSocketClient {
 
   // Event listener registries
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
+  private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
   private evidenceClipListeners = new Set<MessageHandler<EvidenceClipUpdateMessage>>();
   private cameraStatusListeners = new Set<MessageHandler<CameraStatusMessage>>();
@@ -141,6 +143,11 @@ export class VdatWebSocketClient {
     return () => this.liveFrameListeners.delete(handler);
   }
 
+  public onCameraTelemetry(handler: MessageHandler<CameraTelemetryMessage>): () => void {
+    this.cameraTelemetryListeners.add(handler);
+    return () => this.cameraTelemetryListeners.delete(handler);
+  }
+
   public onViolationAlert(handler: MessageHandler<ViolationAlertMessage>): () => void {
     this.violationAlertListeners.add(handler);
     return () => this.violationAlertListeners.delete(handler);
@@ -184,6 +191,9 @@ export class VdatWebSocketClient {
     switch (msg.type) {
       case 'live_frame':
         for (const listener of this.liveFrameListeners) listener(msg);
+        break;
+      case 'camera_telemetry':
+        for (const listener of this.cameraTelemetryListeners) listener(msg);
         break;
       case 'violation_alert':
         for (const listener of this.violationAlertListeners) listener(msg);
