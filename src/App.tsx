@@ -103,6 +103,7 @@ export function App() {
   const zoneEditor = useZoneEditor();
   const zoneCanvasRef = useRef<HTMLCanvasElement>(null);
   const initializedCameraConfigRef = useRef<string | null>(null);
+  const initializedCameraSourceRef = useRef<string | null>(null);
 
   const evidenceDialogRef = useRef<HTMLDialogElement>(null);
 
@@ -118,8 +119,17 @@ export function App() {
   useEffect(() => {
     if (!currentCamera) return;
     const cfg = currentCamera.config;
-    const configKey = `${currentCamera.id}-${cfg?.sourceKey ?? currentCamera.activeSourceKey ?? 'none'}-v${cfg?.version ?? 0}`;
+    const effectiveSourceKey = cfg?.sourceKey ?? currentCamera.activeSourceKey ?? 'none';
+    const sourceSessionKey = `${currentCamera.id}-${effectiveSourceKey}`;
+    const configKey = `${sourceSessionKey}-v${cfg?.version ?? 0}`;
+
+    // Preserve active in-place edits if camerasQuery refetches in the background for the same source
+    if (isAnnotatingZones && initializedCameraSourceRef.current === sourceSessionKey) {
+      return;
+    }
     if (initializedCameraConfigRef.current === configKey) return;
+
+    initializedCameraSourceRef.current = sourceSessionKey;
     initializedCameraConfigRef.current = configKey;
 
     if (!cfg) {
@@ -147,7 +157,7 @@ export function App() {
       crossingMode: Boolean(cfg.crossingMode),
       clearanceSeconds: typeof cfg.clearanceSeconds === 'number' ? cfg.clearanceSeconds : 3.0,
     });
-  }, [currentCamera, zoneEditor]);
+  }, [currentCamera, isAnnotatingZones, zoneEditor]);
 
   // Capture a clean raw frame automatically as soon as the video source starts while annotating
   useEffect(() => {
@@ -350,6 +360,7 @@ export function App() {
     const camId = targetCameraId || focusedCameraId;
     if (camId !== focusedCameraId) {
       initializedCameraConfigRef.current = null;
+      initializedCameraSourceRef.current = null;
       stream.setSelectedCamera(camId);
     }
     const nextOpen = forceOpen !== undefined ? forceOpen : !isAnnotatingZones;
@@ -366,7 +377,7 @@ export function App() {
   };
 
   const handleSaveZones = async () => {
-    const targetCameraId = currentCamera?.id || focusedCameraId || 'cam-01';
+    const targetCameraId = focusedCameraId || currentCamera?.id || 'cam-01';
     setZoneSyncBanner(null);
 
     let nextLanes = zoneEditor.geometry.lanes;
@@ -386,7 +397,9 @@ export function App() {
 
     const activeSourceKey = focusedChannel.isBroadcasting
       ? focusedChannel.sourceKey
-      : currentCamera?.activeSourceKey || currentCamera?.config?.sourceKey || `camera:${targetCameraId}`;
+      : currentCamera?.id === targetCameraId
+        ? currentCamera?.activeSourceKey || currentCamera?.config?.sourceKey || `camera:${targetCameraId}`
+        : `camera:${targetCameraId}`;
 
     try {
       const response = await updateZonesMutation.mutateAsync({
@@ -672,15 +685,34 @@ export function App() {
                   <span className="badge" style={{ color: lightCfg.color }}>
                     Signal: {lightCfg.label}
                   </span>
-                  {auth.isAdmin && (
-                    <button
-                      type="button"
-                      className={`btn btn-compact ${isAnnotatingZones ? 'btn-warning' : ''}`}
-                      onClick={() => toggleAnnotationMode(focusedCameraId)}
-                    >
-                      {isAnnotatingZones ? 'Exit Zone Annotation' : 'Annotate Zones'}
-                    </button>
-                  )}
+                  {auth.isAdmin &&
+                    (isAnnotatingZones ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-active"
+                          disabled={updateZonesMutation.isPending}
+                          onClick={handleSaveZones}
+                        >
+                          {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-warning"
+                          onClick={() => toggleAnnotationMode(focusedCameraId, false)}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-compact"
+                        onClick={() => toggleAnnotationMode(focusedCameraId, true)}
+                      >
+                        Annotate Zones
+                      </button>
+                    ))}
                   <button
                     type="button"
                     className="btn btn-compact"
@@ -804,10 +836,7 @@ export function App() {
                   <button
                     type="button"
                     className={`btn btn-compact ${zoneEditor.mode === 'draw_lane' ? 'btn-warning' : ''}`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('draw_lane');
-                    }}
+                    onClick={() => zoneEditor.setMode('draw_lane')}
                   >
                     1. Approach Lane ({zoneEditor.geometry.lanes.length})
                   </button>
@@ -816,10 +845,7 @@ export function App() {
                     className={`btn btn-compact ${
                       zoneEditor.mode === 'draw_intersection' ? 'btn-active' : ''
                     }`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('draw_intersection');
-                    }}
+                    onClick={() => zoneEditor.setMode('draw_intersection')}
                   >
                     2. Intersection ({zoneEditor.geometry.intersection.length} pts)
                   </button>
@@ -828,10 +854,7 @@ export function App() {
                     className={`btn btn-compact ${
                       zoneEditor.mode === 'draw_exit_zone' ? 'btn-warning' : ''
                     }`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('draw_exit_zone');
-                    }}
+                    onClick={() => zoneEditor.setMode('draw_exit_zone')}
                   >
                     3. Exit Zone ({zoneEditor.geometry.exitZones.length})
                   </button>
@@ -840,10 +863,7 @@ export function App() {
                     className={`btn btn-compact ${
                       zoneEditor.mode === 'place_green_light' ? 'btn-success' : ''
                     }`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('place_green_light');
-                    }}
+                    onClick={() => zoneEditor.setMode('place_green_light')}
                   >
                     4. Green Light
                   </button>
@@ -852,23 +872,26 @@ export function App() {
                     className={`btn btn-compact ${
                       zoneEditor.mode === 'place_red_light' ? 'btn-danger' : ''
                     }`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('place_red_light');
-                    }}
+                    onClick={() => zoneEditor.setMode('place_red_light')}
                   >
                     5. Red Light
                   </button>
                   <button
                     type="button"
                     className={`btn btn-compact ${zoneEditor.mode === 'select' ? 'btn-active' : ''}`}
-                    onClick={() => {
-                      zoneEditor.cancelDrawing();
-                      zoneEditor.setMode('select');
-                    }}
+                    onClick={() => zoneEditor.setMode('select')}
                   >
                     Move Vertex
                   </button>
+                  {zoneEditor.activeDrawingPoints.length >= 3 && (
+                    <button
+                      type="button"
+                      className="btn btn-compact btn-success"
+                      onClick={() => zoneEditor.finishDrawing()}
+                    >
+                      Complete Polygon ({zoneEditor.activeDrawingPoints.length} pts)
+                    </button>
+                  )}
                   <label className="crossing-toggle-label">
                     <input
                       type="checkbox"
@@ -886,6 +909,14 @@ export function App() {
                     }}
                   >
                     Grab Fresh Frame
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-compact btn-active"
+                    disabled={updateZonesMutation.isPending}
+                    onClick={handleSaveZones}
+                  >
+                    {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
                   </button>
                 </div>
               )}
@@ -989,6 +1020,14 @@ export function App() {
                           }}
                           onMouseUp={() => setIsDraggingVertex(false)}
                           onMouseLeave={() => setIsDraggingVertex(false)}
+                          onDoubleClick={(e) => {
+                            e.preventDefault();
+                            zoneEditor.finishDrawing();
+                          }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            zoneEditor.finishDrawing();
+                          }}
                         />
                       </>
                     );

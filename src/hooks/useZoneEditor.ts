@@ -239,6 +239,18 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     setActiveDrawingPoints([]);
   }, []);
 
+  const changeMode = useCallback(
+    (nextMode: EditorMode) => {
+      if (activeDrawingPoints.length >= 3) {
+        finishDrawing();
+      } else if (activeDrawingPoints.length > 0) {
+        setActiveDrawingPoints([]);
+      }
+      setMode(nextMode);
+    },
+    [activeDrawingPoints.length, finishDrawing]
+  );
+
   const deleteLane = useCallback(
     (laneIndex: number) => {
       const updated = {
@@ -339,7 +351,7 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     setGeometry,
     loadGeometry,
     mode,
-    setMode,
+    setMode: changeMode,
     activeDrawingPoints,
     selectedLaneIndex,
     setSelectedLaneIndex,
