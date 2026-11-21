@@ -1,17 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { vdatWsClient } from '../websocket/client';
-import { env } from '../config/env';
 import { DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT } from '../config/constants';
 import type {
   TransmitterSourceType,
-  CameraSourcePreset,
   VideoInputDevice,
 } from './useCameraTransmitter';
 
 export interface CameraChannelState {
   cameraId: string;
-  sourcePreset: CameraSourcePreset;
   sourceType: TransmitterSourceType;
+  sourceKey: string;
   isBroadcasting: boolean;
   sourceLabel: string;
   loopVideo: boolean;
@@ -30,17 +28,13 @@ interface CameraChannelRuntime {
   previewCanvases: Set<HTMLCanvasElement>;
 }
 
-function defaultPresetForCamera(cameraId: string): CameraSourcePreset {
-  if (cameraId === 'cam-02') return 'test_2.mp4';
-  if (cameraId === 'cam-03') return 'test_3.mp4';
-  return 'test_1.mp4';
-}
+const MAX_WS_BUFFERED_BYTES = 512 * 1024; // Skip frame upload if WebSocket queue > 512 KB
 
 export function createInitialChannelState(cameraId: string): CameraChannelState {
   return {
     cameraId,
-    sourcePreset: defaultPresetForCamera(cameraId),
     sourceType: 'none',
+    sourceKey: `camera:${cameraId}`,
     isBroadcasting: false,
     sourceLabel: 'Idle',
     loopVideo: true,
@@ -53,7 +47,7 @@ export function createInitialChannelState(cameraId: string): CameraChannelState 
 export function useMultiCameraTransmitter() {
   const [channels, setChannels] = useState<Record<string, CameraChannelState>>({});
   const [webcamDevices, setWebcamDevices] = useState<VideoInputDevice[]>([]);
-  const [targetFps, setTargetFps] = useState(15);
+  const [baseTargetFps, setBaseTargetFps] = useState(15);
 
   const runtimesRef = useRef<Map<string, CameraChannelRuntime>>(new Map());
   const channelsRef = useRef(channels);
@@ -173,7 +167,13 @@ export function useMultiCameraTransmitter() {
   );
 
   const startCaptureInterval = useCallback(
-    (cameraId: string, activeType: TransmitterSourceType, label: string, fps: number) => {
+    (
+      cameraId: string,
+      activeType: TransmitterSourceType,
+      sourceKey: string,
+      label: string,
+      requestedFps: number
+    ) => {
       const runtime = getRuntime(cameraId);
       if (runtime.timer) {
         clearInterval(runtime.timer);
@@ -184,17 +184,24 @@ export function useMultiCameraTransmitter() {
 
       runtime.frameCounter = 0;
 
+      // Adapt pacing when 4-8 cameras stream concurrently from the same browser tab
+      const activeBroadcastCount = Object.values(channelsRef.current).filter(
+        (c) => c.isBroadcasting
+      ).length;
+      const effectiveFps = activeBroadcastCount >= 3 ? Math.min(requestedFps, 10) : requestedFps;
+
       vdatWsClient.sendPayload({
         type: 'source_init',
         cameraId,
         sourceType: activeType,
+        sourceKey,
         label,
-        fps,
+        fps: effectiveFps,
         width: DEFAULT_CAMERA_WIDTH,
         height: DEFAULT_CAMERA_HEIGHT,
       });
 
-      const intervalMs = Math.max(33, Math.round(1000 / fps));
+      const intervalMs = Math.max(33, Math.round(1000 / effectiveFps));
       runtime.timer = setInterval(() => {
         const { video, canvas, previewCanvases } = runtime;
         if (video.paused || video.ended || video.readyState < 2) {
@@ -203,12 +210,17 @@ export function useMultiCameraTransmitter() {
 
         ctx.drawImage(video, 0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
 
-        // Render raw preview onto any mounted multi-camera wall preview tiles (0 extra network cost)
+        // Always render lightweight raw preview onto mounted multi-camera wall canvases
         for (const pCanvas of previewCanvases) {
           const pCtx = pCanvas.getContext('2d');
           if (pCtx) {
             pCtx.drawImage(canvas, 0, 0, pCanvas.width, pCanvas.height);
           }
+        }
+
+        // Backpressure check: avoid encoding/queuing frames if WebSocket uplink is congested
+        if (vdatWsClient.getBufferedAmount() > MAX_WS_BUFFERED_BYTES) {
+          return;
         }
 
         const dataUrl = canvas.toDataURL('image/jpeg', 0.68);
@@ -226,8 +238,8 @@ export function useMultiCameraTransmitter() {
           cameraId,
           sourceType: activeType,
           frameNumber: count,
-          fps,
-          timestamp: Number((count / fps).toFixed(2)),
+          fps: effectiveFps,
+          timestamp: Number((count / effectiveFps).toFixed(2)),
           image: base64Img,
         });
       }, intervalMs);
@@ -236,7 +248,7 @@ export function useMultiCameraTransmitter() {
   );
 
   const startVideoFileStream = useCallback(
-    async (cameraId: string, fileOrUrl: File | string, customLabel?: string) => {
+    async (cameraId: string, file: File) => {
       stopBroadcast(cameraId);
       updateChannel(cameraId, { error: null });
 
@@ -245,24 +257,21 @@ export function useMultiCameraTransmitter() {
         const currentChannel = channelsRef.current[cameraId] ?? createInitialChannelState(cameraId);
         runtime.video.loop = currentChannel.loopVideo;
 
-        let label = customLabel || 'Web Video Stream';
-        if (typeof fileOrUrl === 'string') {
-          runtime.video.src = fileOrUrl;
-        } else {
-          const objUrl = URL.createObjectURL(fileOrUrl);
-          runtime.objectUrl = objUrl;
-          runtime.video.src = objUrl;
-          label = `Video: ${fileOrUrl.name}`;
-          updateChannel(cameraId, { sourcePreset: 'custom_file' });
-        }
+        const objUrl = URL.createObjectURL(file);
+        runtime.objectUrl = objUrl;
+        runtime.video.src = objUrl;
+
+        const sourceKey = `file:${file.name}`;
+        const label = file.name;
 
         await runtime.video.play();
         updateChannel(cameraId, {
           sourceType: 'video_file',
+          sourceKey,
           sourceLabel: label,
           isBroadcasting: true,
         });
-        startCaptureInterval(cameraId, 'video_file', label, targetFps);
+        startCaptureInterval(cameraId, 'video_file', sourceKey, label, baseTargetFps);
       } catch (err: any) {
         updateChannel(cameraId, {
           error: err.message || 'Failed to play selected video file.',
@@ -270,25 +279,13 @@ export function useMultiCameraTransmitter() {
         stopBroadcast(cameraId);
       }
     },
-    [getRuntime, startCaptureInterval, stopBroadcast, targetFps, updateChannel]
-  );
-
-  const startSampleVideoStream = useCallback(
-    async (
-      cameraId: string,
-      fileName: 'test_1.mp4' | 'test_2.mp4' | 'test_3.mp4' = 'test_1.mp4'
-    ) => {
-      updateChannel(cameraId, { sourcePreset: fileName });
-      const sampleUrl = `${env.apiUrl}/api/evidence/sample-video?file=${encodeURIComponent(fileName)}`;
-      await startVideoFileStream(cameraId, sampleUrl, `Built-in: ${fileName}`);
-    },
-    [startVideoFileStream, updateChannel]
+    [baseTargetFps, getRuntime, startCaptureInterval, stopBroadcast, updateChannel]
   );
 
   const startLaptopCameraStream = useCallback(
     async (cameraId: string, deviceIdOverride?: string) => {
       stopBroadcast(cameraId);
-      updateChannel(cameraId, { error: null, sourcePreset: 'laptop_webcam' });
+      updateChannel(cameraId, { error: null });
 
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
         updateChannel(cameraId, {
@@ -324,14 +321,16 @@ export function useMultiCameraTransmitter() {
         runtime.video.srcObject = mediaStream;
         await runtime.video.play();
 
+        const sourceKey = `webcam:${targetDevice || 'default'}`;
         const label = `Webcam: ${trackLabel}`;
         updateChannel(cameraId, {
           sourceType: 'laptop_webcam',
+          sourceKey,
           sourceLabel: label,
           isBroadcasting: true,
           ...(targetDevice ? { selectedDeviceId: targetDevice } : {}),
         });
-        startCaptureInterval(cameraId, 'laptop_webcam', label, targetFps);
+        startCaptureInterval(cameraId, 'laptop_webcam', sourceKey, label, baseTargetFps);
       } catch (err: any) {
         updateChannel(cameraId, {
           error:
@@ -341,14 +340,7 @@ export function useMultiCameraTransmitter() {
         stopBroadcast(cameraId);
       }
     },
-    [getRuntime, refreshWebcamDevices, startCaptureInterval, stopBroadcast, targetFps, updateChannel]
-  );
-
-  const setSourcePreset = useCallback(
-    (cameraId: string, preset: CameraSourcePreset) => {
-      updateChannel(cameraId, { sourcePreset: preset });
-    },
-    [updateChannel]
+    [baseTargetFps, getRuntime, refreshWebcamDevices, startCaptureInterval, stopBroadcast, updateChannel]
   );
 
   const setLoopVideo = useCallback(
@@ -369,32 +361,37 @@ export function useMultiCameraTransmitter() {
     [updateChannel]
   );
 
-  const bindPreviewCanvas = useCallback((cameraId: string, canvasEl: HTMLCanvasElement | null) => {
-    const runtime = runtimesRef.current.get(cameraId);
-    if (!canvasEl) {
-      if (runtime) {
-        // Clean up disconnected canvas elements
-        for (const existing of Array.from(runtime.previewCanvases)) {
-          if (!existing.isConnected) {
-            runtime.previewCanvases.delete(existing);
+  const bindPreviewCanvas = useCallback(
+    (cameraId: string, canvasEl: HTMLCanvasElement | null) => {
+      const runtime = runtimesRef.current.get(cameraId);
+      if (!canvasEl) {
+        if (runtime) {
+          for (const existing of Array.from(runtime.previewCanvases)) {
+            if (!existing.isConnected) {
+              runtime.previewCanvases.delete(existing);
+            }
           }
         }
+        return;
       }
-      return;
-    }
-    const targetRuntime = runtime ?? getRuntime(cameraId);
-    targetRuntime.previewCanvases.add(canvasEl);
-    // Synchronously paint current frame if active
-    const pCtx = canvasEl.getContext('2d');
-    if (pCtx && !targetRuntime.video.paused && targetRuntime.video.readyState >= 2) {
-      pCtx.drawImage(targetRuntime.canvas, 0, 0, canvasEl.width, canvasEl.height);
-    }
-  }, [getRuntime]);
+      const targetRuntime = runtime ?? getRuntime(cameraId);
+      targetRuntime.previewCanvases.add(canvasEl);
+      const pCtx = canvasEl.getContext('2d');
+      if (pCtx && !targetRuntime.video.paused && targetRuntime.video.readyState >= 2) {
+        pCtx.drawImage(targetRuntime.canvas, 0, 0, canvasEl.width, canvasEl.height);
+      }
+    },
+    [getRuntime]
+  );
 
   const getChannelSnapshot = useCallback((cameraId: string): string | null => {
     const runtime = runtimesRef.current.get(cameraId);
     if (!runtime || runtime.video.readyState < 2) return null;
     try {
+      const ctx = runtime.canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(runtime.video, 0, 0, runtime.canvas.width, runtime.canvas.height);
+      }
       return runtime.canvas.toDataURL('image/jpeg', 0.85);
     } catch {
       return null;
@@ -420,14 +417,12 @@ export function useMultiCameraTransmitter() {
     channels,
     getChannel,
     webcamDevices,
-    targetFps,
-    setTargetFps,
-    setSourcePreset,
+    targetFps: baseTargetFps,
+    setTargetFps: setBaseTargetFps,
     setLoopVideo,
     setSelectedDeviceId,
     refreshWebcamDevices,
     startVideoFileStream,
-    startSampleVideoStream,
     startLaptopCameraStream,
     stopBroadcast,
     bindPreviewCanvas,

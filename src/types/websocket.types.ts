@@ -1,4 +1,5 @@
 import { Violation } from './violation.types';
+import { ZoneProfileConfig } from './camera.types';
 
 export type TrafficLightState = 'red' | 'green' | 'yellow' | 'unknown' | string;
 
@@ -55,6 +56,14 @@ export interface EvidenceClipUpdateMessage {
   violationId?: string;
 }
 
+export interface CameraProfileSwitchedMessage {
+  type: 'camera_profile_switched';
+  cameraId: string;
+  sourceKey: string;
+  config: ZoneProfileConfig | null;
+  timestamp: number;
+}
+
 export interface PongMessage {
   type: 'pong';
   timestamp: number;
@@ -65,6 +74,7 @@ export type InboundWSMessage =
   | CameraStatusMessage
   | LiveFrameMessage
   | CameraTelemetryMessage
+  | CameraProfileSwitchedMessage
   | ViolationAlertMessage
   | EvidenceClipUpdateMessage
   | PongMessage;

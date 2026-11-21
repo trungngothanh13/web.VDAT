@@ -833,4 +833,33 @@
     font-size: 0.78rem;
     color: var(--text);
   }
+
+  .inline-zone-drawer {
+    border-block-start: 1px solid var(--border);
+    background: rgba(15, 23, 42, 0.45);
+    padding: var(--space-md);
+    display: grid;
+    gap: var(--space-md);
+  }
+
+  .inline-zone-lists {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--space-md);
+    align-items: start;
+  }
+
+  .crossing-toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding-block: 0.25rem;
+    padding-inline: 0.55rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: rgba(255, 255, 255, 0.04);
+    font-size: 0.74rem;
+    color: var(--text);
+    cursor: pointer;
+  }
 }

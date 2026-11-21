@@ -17,15 +17,21 @@ export interface CameraMetadata {
   [key: string]: unknown;
 }
 
-export interface CameraConfig {
+export interface ZoneProfileConfig {
   id: string;
-  cameraId: string;
+  sourceKey: string;
+  name: string;
   lanes: Polygon[];
   intersection: Polygon;
+  exitZones: Polygon[];
   lightBox?: TrafficLightSamplingBox[] | unknown;
+  crossingMode: boolean;
+  clearanceSeconds: number;
   version: number;
   updatedAt: string;
 }
+
+export type CameraConfig = ZoneProfileConfig;
 
 export interface Camera {
   id: string;
@@ -34,23 +40,29 @@ export interface Camera {
   rtspUrl?: string | null;
   isActive: boolean;
   lastSeenAt?: string | null;
+  activeSourceKey?: string | null;
+  activeZoneProfileId?: string | null;
   metadata?: CameraMetadata | null;
   createdAt: string;
   updatedAt: string;
-  config?: CameraConfig | null;
+  config?: ZoneProfileConfig | null;
   isLive?: boolean;
   violationCount?: number;
 }
 
 export interface UpdateZonePayload {
+  sourceKey?: string;
+  name?: string;
   lanes: Polygon[];
   intersection: Polygon;
+  exitZones?: Polygon[];
   lightBox?: TrafficLightSamplingBox[] | unknown;
+  crossingMode?: boolean;
+  clearanceSeconds?: number;
 }
 
 export interface UpdateZoneResponse {
-  config: CameraConfig;
+  config: ZoneProfileConfig;
   syncedWithAI: boolean;
   message: string;
 }
-

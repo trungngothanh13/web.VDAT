@@ -1,5 +1,10 @@
 import { apiClient } from './client';
-import { Camera, UpdateZonePayload, UpdateZoneResponse } from '../types/camera.types';
+import {
+  Camera,
+  ZoneProfileConfig,
+  UpdateZonePayload,
+  UpdateZoneResponse,
+} from '../types/camera.types';
 
 export const cameraApi = {
   /**
@@ -7,6 +12,14 @@ export const cameraApi = {
    */
   async listCameras(): Promise<Camera[]> {
     const { data } = await apiClient.get<Camera[]>('/api/cameras');
+    return data;
+  },
+
+  /**
+   * List saved source-keyed zone profiles
+   */
+  async listZoneProfiles(): Promise<ZoneProfileConfig[]> {
+    const { data } = await apiClient.get<ZoneProfileConfig[]>('/api/cameras/profiles');
     return data;
   },
 

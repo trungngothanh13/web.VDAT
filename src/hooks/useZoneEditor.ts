@@ -9,40 +9,48 @@ import {
 export interface ZoneGeometryState {
   lanes: Polygon[];
   intersection: Polygon;
+  exitZones: Polygon[];
   lightBoxes: TrafficLightSamplingBox[];
+  crossingMode: boolean;
+  clearanceSeconds: number;
 }
 
 export type EditorMode =
   | 'select'
   | 'draw_lane'
   | 'draw_intersection'
+  | 'draw_exit_zone'
   | 'place_green_light'
   | 'place_red_light';
 
+function normalizeState(initial?: Partial<ZoneGeometryState>): ZoneGeometryState {
+  return {
+    lanes: initial?.lanes || [],
+    intersection: initial?.intersection || [],
+    exitZones: initial?.exitZones || [],
+    lightBoxes: (initial?.lightBoxes as TrafficLightSamplingBox[]) || [],
+    crossingMode: Boolean(initial?.crossingMode),
+    clearanceSeconds:
+      typeof initial?.clearanceSeconds === 'number' ? initial.clearanceSeconds : 3.0,
+  };
+}
+
 export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
-  const [geometry, setGeometry] = useState<ZoneGeometryState>({
-    lanes: initialGeometry?.lanes || [],
-    intersection: initialGeometry?.intersection || [],
-    lightBoxes: (initialGeometry?.lightBoxes as TrafficLightSamplingBox[]) || [],
-  });
+  const initialState = normalizeState(initialGeometry);
+  const [geometry, setGeometry] = useState<ZoneGeometryState>(initialState);
 
   const [mode, setMode] = useState<EditorMode>('draw_lane');
   const [selectedLaneIndex, setSelectedLaneIndex] = useState<number | null>(null);
+  const [selectedExitIndex, setSelectedExitIndex] = useState<number | null>(null);
   const [selectedVertex, setSelectedVertex] = useState<{
-    target: 'lane' | 'intersection';
+    target: 'lane' | 'intersection' | 'exit_zone';
     index: number;
     vertexIndex: number;
   } | null>(null);
 
   const [activeDrawingPoints, setActiveDrawingPoints] = useState<Point2D[]>([]);
 
-  const historyRef = useRef<ZoneGeometryState[]>([
-    {
-      lanes: initialGeometry?.lanes || [],
-      intersection: initialGeometry?.intersection || [],
-      lightBoxes: (initialGeometry?.lightBoxes as TrafficLightSamplingBox[]) || [],
-    },
-  ]);
+  const historyRef = useRef<ZoneGeometryState[]>([JSON.parse(JSON.stringify(initialState))]);
   const historyIndexRef = useRef(0);
 
   const pushHistory = useCallback((newState: ZoneGeometryState) => {
@@ -51,16 +59,17 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     historyIndexRef.current = historyRef.current.length - 1;
   }, []);
 
-  const loadGeometry = useCallback(
-    (nextGeometry: ZoneGeometryState) => {
-      const cloned: ZoneGeometryState = JSON.parse(JSON.stringify(nextGeometry));
-      setGeometry(cloned);
-      setActiveDrawingPoints([]);
-      setSelectedVertex(null);
-      pushHistory(cloned);
-    },
-    [pushHistory]
-  );
+  const loadGeometry = useCallback((nextGeometry: Partial<ZoneGeometryState>) => {
+    const normalized = normalizeState(nextGeometry);
+    const cloned: ZoneGeometryState = JSON.parse(JSON.stringify(normalized));
+    setGeometry(cloned);
+    setActiveDrawingPoints([]);
+    setSelectedVertex(null);
+    setSelectedLaneIndex(null);
+    setSelectedExitIndex(null);
+    historyRef.current = [JSON.parse(JSON.stringify(cloned))];
+    historyIndexRef.current = 0;
+  }, []);
 
   const undo = useCallback(() => {
     if (historyIndexRef.current > 0) {
@@ -97,6 +106,13 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
       };
       setGeometry(updated);
       pushHistory(updated);
+    } else if (mode === 'draw_exit_zone') {
+      const updated: ZoneGeometryState = {
+        ...geometry,
+        exitZones: [...geometry.exitZones, activeDrawingPoints],
+      };
+      setGeometry(updated);
+      pushHistory(updated);
     }
 
     setActiveDrawingPoints([]);
@@ -120,7 +136,7 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
         frameHeight
       );
 
-      if (mode === 'draw_lane' || mode === 'draw_intersection') {
+      if (mode === 'draw_lane' || mode === 'draw_intersection' || mode === 'draw_exit_zone') {
         if (
           activeDrawingPoints.length >= 3 &&
           isPointNearVertex(framePt, activeDrawingPoints[0], 14)
@@ -157,6 +173,17 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
           }
         }
 
+        for (let eIdx = 0; eIdx < geometry.exitZones.length; eIdx++) {
+          const ez = geometry.exitZones[eIdx];
+          for (let vIdx = 0; vIdx < ez.length; vIdx++) {
+            if (isPointNearVertex(framePt, ez[vIdx], 12)) {
+              setSelectedVertex({ target: 'exit_zone', index: eIdx, vertexIndex: vIdx });
+              setSelectedExitIndex(eIdx);
+              return;
+            }
+          }
+        }
+
         setSelectedVertex(null);
       }
     },
@@ -184,13 +211,20 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
 
       setGeometry((prev) => {
         if (selectedVertex.target === 'lane') {
-          const updatedLanes = prev.lanes.map((lane, lIdx) => {
-            if (lIdx === selectedVertex.index) {
-              return lane.map((v, vIdx) => (vIdx === selectedVertex.vertexIndex ? framePt : v));
-            }
-            return lane;
-          });
+          const updatedLanes = prev.lanes.map((lane, lIdx) =>
+            lIdx === selectedVertex.index
+              ? lane.map((v, vIdx) => (vIdx === selectedVertex.vertexIndex ? framePt : v))
+              : lane
+          );
           return { ...prev, lanes: updatedLanes };
+        }
+        if (selectedVertex.target === 'exit_zone') {
+          const updatedExits = prev.exitZones.map((ez, eIdx) =>
+            eIdx === selectedVertex.index
+              ? ez.map((v, vIdx) => (vIdx === selectedVertex.vertexIndex ? framePt : v))
+              : ez
+          );
+          return { ...prev, exitZones: updatedExits };
         }
         const updatedIntersection = prev.intersection.map((v, vIdx) =>
           vIdx === selectedVertex.vertexIndex ? framePt : v
@@ -220,6 +254,21 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     [geometry, selectedLaneIndex, pushHistory]
   );
 
+  const deleteExitZone = useCallback(
+    (exitIndex: number) => {
+      const updated = {
+        ...geometry,
+        exitZones: geometry.exitZones.filter((_, idx) => idx !== exitIndex),
+      };
+      setGeometry(updated);
+      pushHistory(updated);
+      if (selectedExitIndex === exitIndex) {
+        setSelectedExitIndex(null);
+      }
+    },
+    [geometry, selectedExitIndex, pushHistory]
+  );
+
   const deleteLightBox = useCallback(
     (lightIndex: number) => {
       const updated = {
@@ -238,25 +287,52 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     pushHistory(updated);
   }, [geometry, pushHistory]);
 
+  const setCrossingMode = useCallback(
+    (crossingMode: boolean) => {
+      const updated = { ...geometry, crossingMode };
+      setGeometry(updated);
+      pushHistory(updated);
+    },
+    [geometry, pushHistory]
+  );
+
+  const setClearanceSeconds = useCallback(
+    (clearanceSeconds: number) => {
+      const updated = { ...geometry, clearanceSeconds };
+      setGeometry(updated);
+      pushHistory(updated);
+    },
+    [geometry, pushHistory]
+  );
+
   const deleteLastInActiveMode = useCallback(() => {
     if (mode === 'draw_lane' && geometry.lanes.length > 0) {
       deleteLane(geometry.lanes.length - 1);
     } else if (mode === 'draw_intersection' && geometry.intersection.length > 0) {
       clearIntersection();
+    } else if (mode === 'draw_exit_zone' && geometry.exitZones.length > 0) {
+      deleteExitZone(geometry.exitZones.length - 1);
     } else if (
       (mode === 'place_green_light' || mode === 'place_red_light') &&
       geometry.lightBoxes.length > 0
     ) {
       deleteLightBox(geometry.lightBoxes.length - 1);
     }
-  }, [mode, geometry, deleteLane, clearIntersection, deleteLightBox]);
+  }, [mode, geometry, deleteLane, clearIntersection, deleteExitZone, deleteLightBox]);
 
   const resetAllZones = useCallback(() => {
-    const empty: ZoneGeometryState = { lanes: [], intersection: [], lightBoxes: [] };
+    const empty: ZoneGeometryState = {
+      lanes: [],
+      intersection: [],
+      exitZones: [],
+      lightBoxes: [],
+      crossingMode: geometry.crossingMode,
+      clearanceSeconds: geometry.clearanceSeconds,
+    };
     setGeometry(empty);
     setActiveDrawingPoints([]);
     pushHistory(empty);
-  }, [pushHistory]);
+  }, [geometry.crossingMode, geometry.clearanceSeconds, pushHistory]);
 
   return {
     geometry,
@@ -267,6 +343,8 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     activeDrawingPoints,
     selectedLaneIndex,
     setSelectedLaneIndex,
+    selectedExitIndex,
+    setSelectedExitIndex,
     selectedVertex,
     setSelectedVertex,
     handleCanvasClick,
@@ -274,8 +352,11 @@ export function useZoneEditor(initialGeometry?: Partial<ZoneGeometryState>) {
     finishDrawing,
     cancelDrawing,
     deleteLane,
+    deleteExitZone,
     deleteLightBox,
     clearIntersection,
+    setCrossingMode,
+    setClearanceSeconds,
     deleteLastInActiveMode,
     resetAllZones,
     undo,

@@ -26,39 +26,6 @@ import { Violation, ViolationStatus } from './types/violation.types';
 import { TrafficLightSamplingBox } from './types/camera.types';
 import './styles/dashboard.css';
 
-const DEFAULT_ZONES_FALLBACK = {
-  lanes: [
-    [
-      [429, 161],
-      [433, 247],
-      [550, 230],
-      [560, 213],
-      [577, 213],
-      [581, 203],
-      [637, 181],
-      [696, 167],
-      [730, 158],
-      [717, 139],
-      [601, 148],
-      [584, 142],
-      [434, 156],
-    ] as [number, number][],
-  ],
-  intersection: [
-    [429, 157],
-    [432, 246],
-    [226, 273],
-    [149, 293],
-    [154, 186],
-    [205, 171],
-    [426, 158],
-  ] as [number, number][],
-  lightBoxes: [
-    { x: 570, y: 148, color: 'green' as const },
-    { x: 570, y: 130, color: 'red' as const },
-  ],
-};
-
 function bindDialogLightDismissFallback(dialog: HTMLDialogElement | null) {
   if (!dialog || typeof HTMLDialogElement === 'undefined') return () => {};
   if ('closedBy' in HTMLDialogElement.prototype) return () => {};
@@ -82,7 +49,7 @@ function bindDialogLightDismissFallback(dialog: HTMLDialogElement | null) {
 export function App() {
   const auth = useAuth();
 
-  const [activeTab, setActiveTab] = useState<'monitor' | 'zones' | 'analytics'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'analytics'>('monitor');
   const [statusFilter, setStatusFilter] = useState<ViolationStatus | undefined>(undefined);
   const [cameraFilter, setCameraFilter] = useState<string | undefined>(undefined);
   const [activeEvidence, setActiveEvidence] = useState<{
@@ -102,8 +69,9 @@ export function App() {
   const [password, setPassword] = useState('admin123');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Zone Editor State
-  const [useLiveFrameInEditor, setUseLiveFrameInEditor] = useState(false);
+  // In-Place Zone Annotation State
+  const [isAnnotatingZones, setIsAnnotatingZones] = useState(false);
+  const [editorSnapshotUrl, setEditorSnapshotUrl] = useState<string | null>(null);
   const [zoneSyncBanner, setZoneSyncBanner] = useState<string | null>(null);
   const [isDraggingVertex, setIsDraggingVertex] = useState(false);
 
@@ -132,7 +100,7 @@ export function App() {
   const createCameraMutation = useCreateCamera();
   const updateZonesMutation = useUpdateZones();
 
-  const zoneEditor = useZoneEditor(DEFAULT_ZONES_FALLBACK);
+  const zoneEditor = useZoneEditor();
   const zoneCanvasRef = useRef<HTMLCanvasElement>(null);
   const initializedCameraConfigRef = useRef<string | null>(null);
 
@@ -143,35 +111,61 @@ export function App() {
     return () => cleanDialog();
   }, [auth.isAuthenticated]);
 
-  // Load camera zone config from API when camerasQuery resolves
+  // Sync in-place Zone Editor state cleanly when focused camera or active ZoneProfile changes
   const currentCamera =
-    camerasQuery.data?.find((c) => c.id === stream.selectedCameraId) ?? camerasQuery.data?.[0];
+    camerasQuery.data?.find((c) => c.id === focusedCameraId) ?? camerasQuery.data?.[0];
 
   useEffect(() => {
-    if (!currentCamera?.config) return;
-    const configKey = `${currentCamera.id}-v${currentCamera.config.version}`;
+    if (!currentCamera) return;
+    const cfg = currentCamera.config;
+    const configKey = `${currentCamera.id}-${cfg?.sourceKey ?? currentCamera.activeSourceKey ?? 'none'}-v${cfg?.version ?? 0}`;
     if (initializedCameraConfigRef.current === configKey) return;
     initializedCameraConfigRef.current = configKey;
 
-    const rawLightBox = currentCamera.config.lightBox;
+    if (!cfg) {
+      zoneEditor.loadGeometry({
+        lanes: [],
+        intersection: [],
+        exitZones: [],
+        lightBoxes: [],
+        crossingMode: false,
+        clearanceSeconds: 3.0,
+      });
+      return;
+    }
+
+    const rawLightBox = cfg.lightBox;
     const lightBoxes: TrafficLightSamplingBox[] = Array.isArray(rawLightBox)
       ? (rawLightBox as TrafficLightSamplingBox[])
-      : DEFAULT_ZONES_FALLBACK.lightBoxes;
+      : [];
 
     zoneEditor.loadGeometry({
-      lanes: Array.isArray(currentCamera.config.lanes)
-        ? currentCamera.config.lanes
-        : DEFAULT_ZONES_FALLBACK.lanes,
-      intersection: Array.isArray(currentCamera.config.intersection)
-        ? currentCamera.config.intersection
-        : DEFAULT_ZONES_FALLBACK.intersection,
+      lanes: Array.isArray(cfg.lanes) ? cfg.lanes : [],
+      intersection: Array.isArray(cfg.intersection) ? cfg.intersection : [],
+      exitZones: Array.isArray(cfg.exitZones) ? cfg.exitZones : [],
       lightBoxes,
+      crossingMode: Boolean(cfg.crossingMode),
+      clearanceSeconds: typeof cfg.clearanceSeconds === 'number' ? cfg.clearanceSeconds : 3.0,
     });
   }, [currentCamera, zoneEditor]);
 
+  // Capture a clean raw frame automatically as soon as the video source starts while annotating
+  useEffect(() => {
+    if (isAnnotatingZones && !editorSnapshotUrl && focusedChannel.transmittedFrames >= 1) {
+      const snap = transmitters.getChannelSnapshot(focusedCameraId);
+      if (snap) setEditorSnapshotUrl(snap);
+    }
+  }, [
+    isAnnotatingZones,
+    editorSnapshotUrl,
+    focusedChannel.transmittedFrames,
+    focusedCameraId,
+    transmitters,
+  ]);
+
   // Draw Zone Editor overlays onto <canvas>
   useEffect(() => {
-    if (activeTab !== 'zones') return;
+    if (activeTab !== 'monitor' || !isAnnotatingZones) return;
     const canvas = zoneCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -179,7 +173,7 @@ export function App() {
 
     ctx.clearRect(0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
 
-    // 1. Draw completed Lanes (Yellow polygons matching zone_drawer.py)
+    // 1. Draw Approach Lanes (Yellow)
     zoneEditor.geometry.lanes.forEach((lane, idx) => {
       if (lane.length < 3) return;
       ctx.beginPath();
@@ -197,7 +191,6 @@ export function App() {
       ctx.strokeStyle = '#eab308';
       ctx.stroke();
 
-      // Draw vertices & label
       lane.forEach((pt, vIdx) => {
         ctx.beginPath();
         ctx.arc(pt[0], pt[1], 4.5, 0, Math.PI * 2);
@@ -215,10 +208,10 @@ export function App() {
 
       ctx.font = '600 12px Inter, sans-serif';
       ctx.fillStyle = '#fef08a';
-      ctx.fillText(`Lane ${idx + 1}`, lane[0][0] + 6, lane[0][1] - 6);
+      ctx.fillText(`Approach ${idx + 1}`, lane[0][0] + 6, lane[0][1] - 6);
     });
 
-    // 2. Draw Intersection polygon (Blue polygon matching zone_drawer.py)
+    // 2. Draw Intersection polygon (Blue)
     const inter = zoneEditor.geometry.intersection;
     if (inter.length >= 3) {
       ctx.beginPath();
@@ -252,33 +245,56 @@ export function App() {
       ctx.fillText('Intersection', inter[0][0] + 6, inter[0][1] - 6);
     }
 
-    // 3. Draw Traffic Light sampling windows (25x25px window, radius=12 matching TrafficLightDetector)
-    zoneEditor.geometry.lightBoxes.forEach((lb, idx) => {
-      const isGreen = lb.color === 'green';
-      const strokeColor = isGreen ? '#22c55e' : '#ef4444';
-      const fillColor = isGreen ? 'rgba(34, 197, 94, 0.25)' : 'rgba(239, 68, 68, 0.25)';
-
-      ctx.fillStyle = fillColor;
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 2;
-      ctx.fillRect(lb.x - 12, lb.y - 12, 24, 24);
-      ctx.strokeRect(lb.x - 12, lb.y - 12, 24, 24);
-
+    // 3. Draw Exit Zones (Orange)
+    zoneEditor.geometry.exitZones.forEach((ez, idx) => {
+      if (ez.length < 3) return;
       ctx.beginPath();
-      ctx.arc(lb.x, lb.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = strokeColor;
+      ctx.moveTo(ez[0][0], ez[0][1]);
+      for (let i = 1; i < ez.length; i++) {
+        ctx.lineTo(ez[i][0], ez[i][1]);
+      }
+      ctx.closePath();
+      ctx.fillStyle =
+        zoneEditor.selectedExitIndex === idx
+          ? 'rgba(249, 115, 22, 0.34)'
+          : 'rgba(249, 115, 22, 0.20)';
       ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#f97316';
+      ctx.stroke();
 
-      ctx.font = '600 11px Inter, sans-serif';
-      ctx.fillStyle = strokeColor;
-      ctx.fillText(
-        `${(lb.color || 'red').toUpperCase()} #${idx + 1} (${lb.x},${lb.y})`,
-        lb.x + 16,
-        lb.y + 4
-      );
+      ez.forEach((pt, vIdx) => {
+        ctx.beginPath();
+        ctx.arc(pt[0], pt[1], 4.5, 0, Math.PI * 2);
+        ctx.fillStyle =
+          zoneEditor.selectedVertex?.target === 'exit_zone' &&
+          zoneEditor.selectedVertex.index === idx &&
+          zoneEditor.selectedVertex.vertexIndex === vIdx
+            ? '#ffffff'
+            : '#fb923c';
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+
+      ctx.font = '600 12px Inter, sans-serif';
+      ctx.fillStyle = '#fdba74';
+      ctx.fillText(`Exit Zone ${idx + 1}`, ez[0][0] + 6, ez[0][1] - 6);
     });
 
-    // 4. Draw in-progress polygon points (Cyan)
+    // 4. Draw Traffic Light points as small unobstructed solid dots
+    zoneEditor.geometry.lightBoxes.forEach((lb) => {
+      const isGreen = lb.color === 'green';
+      const dotColor = isGreen ? '#22c55e' : '#ef4444';
+
+      ctx.beginPath();
+      ctx.arc(lb.x, lb.y, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = dotColor;
+      ctx.fill();
+    });
+
+    // 5. Draw in-progress polygon points (Cyan)
     const activePts = zoneEditor.activeDrawingPoints;
     if (activePts.length > 0) {
       ctx.beginPath();
@@ -304,9 +320,11 @@ export function App() {
     }
   }, [
     activeTab,
+    isAnnotatingZones,
     zoneEditor.geometry,
     zoneEditor.activeDrawingPoints,
     zoneEditor.selectedLaneIndex,
+    zoneEditor.selectedExitIndex,
     zoneEditor.selectedVertex,
   ]);
 
@@ -328,35 +346,66 @@ export function App() {
     evidenceDialogRef.current?.showModal();
   };
 
+  const toggleAnnotationMode = (targetCameraId?: string, forceOpen?: boolean) => {
+    const camId = targetCameraId || focusedCameraId;
+    if (camId !== focusedCameraId) {
+      initializedCameraConfigRef.current = null;
+      stream.setSelectedCamera(camId);
+    }
+    const nextOpen = forceOpen !== undefined ? forceOpen : !isAnnotatingZones;
+    setZoneSyncBanner(null);
+    if (nextOpen) {
+      const snap = transmitters.getChannelSnapshot(camId);
+      setEditorSnapshotUrl(snap);
+    } else {
+      setEditorSnapshotUrl(null);
+      zoneEditor.cancelDrawing();
+    }
+    setIsAnnotatingZones(nextOpen);
+    setActiveTab('monitor');
+  };
+
   const handleSaveZones = async () => {
-    const targetCameraId = currentCamera?.id || stream.selectedCameraId || 'cam-01';
+    const targetCameraId = currentCamera?.id || focusedCameraId || 'cam-01';
     setZoneSyncBanner(null);
 
-    // If the user has an unfinished polygon with >= 3 points, automatically commit it before saving
     let nextLanes = zoneEditor.geometry.lanes;
     let nextIntersection = zoneEditor.geometry.intersection;
+    let nextExitZones = zoneEditor.geometry.exitZones;
     if (zoneEditor.activeDrawingPoints.length >= 3) {
       const committedPolygon = [...zoneEditor.activeDrawingPoints];
       if (zoneEditor.mode === 'draw_lane') {
         nextLanes = [...nextLanes, committedPolygon];
       } else if (zoneEditor.mode === 'draw_intersection') {
         nextIntersection = committedPolygon;
+      } else if (zoneEditor.mode === 'draw_exit_zone') {
+        nextExitZones = [...nextExitZones, committedPolygon];
       }
       zoneEditor.finishDrawing();
     }
+
+    const activeSourceKey = focusedChannel.isBroadcasting
+      ? focusedChannel.sourceKey
+      : currentCamera?.activeSourceKey || currentCamera?.config?.sourceKey || `camera:${targetCameraId}`;
 
     try {
       const response = await updateZonesMutation.mutateAsync({
         cameraId: targetCameraId,
         payload: {
+          sourceKey: activeSourceKey,
           lanes: nextLanes,
           intersection: nextIntersection,
+          exitZones: nextExitZones,
           lightBox: zoneEditor.geometry.lightBoxes,
+          crossingMode: zoneEditor.geometry.crossingMode,
+          clearanceSeconds: zoneEditor.geometry.clearanceSeconds,
         },
       });
       setZoneSyncBanner(response.message);
+      setIsAnnotatingZones(false);
+      setEditorSnapshotUrl(null);
     } catch (err: any) {
-      setZoneSyncBanner(err.message || 'Failed to save zone configuration.');
+      setZoneSyncBanner(err.message || 'Failed to save zone profile.');
     }
   };
 
@@ -585,15 +634,6 @@ export function App() {
             >
               Live Monitor
             </button>
-            {auth.isAdmin && (
-              <button
-                type="button"
-                className={`btn ${activeTab === 'zones' ? 'btn-active' : ''}`}
-                onClick={() => setActiveTab('zones')}
-              >
-                Zone Editor
-              </button>
-            )}
             <button
               type="button"
               className={`btn ${activeTab === 'analytics' ? 'btn-active' : ''}`}
@@ -620,7 +660,7 @@ export function App() {
 
       {activeTab === 'monitor' && (
         <main className="workspace-grid">
-          {/* Left Column: Primary Focused AI Stream + Multi-Source Preview Wall */}
+          {/* Left Column: Primary Focused AI Stream (with In-Place Annotate Zones) + Multi-Source Wall */}
           <div className="primary-column">
             <section className="card card-stream" aria-labelledby="stream-title">
               <div className="card-header">
@@ -635,10 +675,10 @@ export function App() {
                   {auth.isAdmin && (
                     <button
                       type="button"
-                      className="btn btn-compact"
-                      onClick={() => setActiveTab('zones')}
+                      className={`btn btn-compact ${isAnnotatingZones ? 'btn-warning' : ''}`}
+                      onClick={() => toggleAnnotationMode(focusedCameraId)}
                     >
-                      Edit Zones
+                      {isAnnotatingZones ? 'Exit Zone Annotation' : 'Annotate Zones'}
                     </button>
                   )}
                   <button
@@ -651,7 +691,7 @@ export function App() {
                 </div>
               </div>
 
-              {/* Camera Input Source Selector for Currently Focused Camera */}
+              {/* Camera Input Source Controls: Local Video File + Laptop Webcam */}
               <div
                 className="filter-bar"
                 role="region"
@@ -659,12 +699,9 @@ export function App() {
                 style={{ justifyContent: 'space-between', alignItems: 'center' }}
               >
                 <div className="toolbar-actions">
-                  <label
-                    htmlFor="camera-source-select"
-                    style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)' }}
-                  >
-                    Camera Input Source ({focusedCameraId}):
-                  </label>
+                  <span style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+                    Source ({focusedCameraId}):
+                  </span>
                   <input
                     ref={focusedFileInputRef}
                     type="file"
@@ -673,65 +710,35 @@ export function App() {
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       if (file) {
+                        setEditorSnapshotUrl(null);
                         void transmitters.startVideoFileStream(focusedCameraId, file);
                         e.target.value = '';
                       }
                     }}
                   />
-                  <select
-                    id="camera-source-select"
-                    className="btn btn-compact"
-                    value={focusedChannel.sourcePreset}
-                    onChange={(e) => {
-                      const val = e.target.value as
-                        | 'test_1.mp4'
-                        | 'test_2.mp4'
-                        | 'test_3.mp4'
-                        | 'custom_file'
-                        | 'laptop_webcam';
-                      transmitters.setSourcePreset(focusedCameraId, val);
-                      if (val === 'test_1.mp4' || val === 'test_2.mp4' || val === 'test_3.mp4') {
-                        void transmitters.startSampleVideoStream(focusedCameraId, val);
-                      } else if (val === 'laptop_webcam') {
-                        void transmitters.startLaptopCameraStream(focusedCameraId);
-                      } else if (val === 'custom_file') {
-                        focusedFileInputRef.current?.click();
-                      }
-                    }}
-                  >
-                    <option value="test_1.mp4">Built-in Footage: test_1.mp4 (Intersection 1)</option>
-                    <option value="test_2.mp4">Built-in Footage: test_2.mp4 (Intersection 2)</option>
-                    <option value="test_3.mp4">Built-in Footage: test_3.mp4 (Intersection 3)</option>
-                    <option value="custom_file">Custom Video File (From Computer...)</option>
-                    <option value="laptop_webcam">Laptop Camera (Hardware Webcam)</option>
-                  </select>
 
                   <button
                     type="button"
                     className="btn btn-compact btn-active"
-                    onClick={() => {
-                      const p = focusedChannel.sourcePreset;
-                      if (p === 'test_1.mp4' || p === 'test_2.mp4' || p === 'test_3.mp4') {
-                        void transmitters.startSampleVideoStream(focusedCameraId, p);
-                      } else if (p === 'laptop_webcam') {
-                        void transmitters.startLaptopCameraStream(focusedCameraId);
-                      } else {
-                        focusedFileInputRef.current?.click();
-                      }
-                    }}
+                    onClick={() => focusedFileInputRef.current?.click()}
                   >
-                    {focusedChannel.isBroadcasting ? 'Restart Source' : 'Start Selected Source'}
+                    Select Video File...
                   </button>
 
                   <button
                     type="button"
-                    className="btn btn-compact"
-                    onClick={() => focusedFileInputRef.current?.click()}
+                    className={`btn btn-compact ${
+                      focusedChannel.sourceType === 'laptop_webcam' ? 'btn-active' : ''
+                    }`}
+                    onClick={() => {
+                      setEditorSnapshotUrl(null);
+                      void transmitters.startLaptopCameraStream(focusedCameraId);
+                    }}
                   >
-                    Browse Video File...
+                    Use Laptop Camera
                   </button>
 
-                  {focusedChannel.sourcePreset === 'laptop_webcam' &&
+                  {focusedChannel.sourceType === 'laptop_webcam' &&
                     transmitters.webcamDevices.length > 0 && (
                       <select
                         aria-label="Select laptop camera device"
@@ -739,6 +746,7 @@ export function App() {
                         value={focusedChannel.selectedDeviceId}
                         onChange={(e) => {
                           transmitters.setSelectedDeviceId(focusedCameraId, e.target.value);
+                          setEditorSnapshotUrl(null);
                           void transmitters.startLaptopCameraStream(
                             focusedCameraId,
                             e.target.value
@@ -791,6 +799,97 @@ export function App() {
                 </div>
               </div>
 
+              {isAnnotatingZones && auth.isAdmin && (
+                <div className="filter-bar" role="group" aria-label="In-place zone annotation tools">
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${zoneEditor.mode === 'draw_lane' ? 'btn-warning' : ''}`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('draw_lane');
+                    }}
+                  >
+                    1. Approach Lane ({zoneEditor.geometry.lanes.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${
+                      zoneEditor.mode === 'draw_intersection' ? 'btn-active' : ''
+                    }`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('draw_intersection');
+                    }}
+                  >
+                    2. Intersection ({zoneEditor.geometry.intersection.length} pts)
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${
+                      zoneEditor.mode === 'draw_exit_zone' ? 'btn-warning' : ''
+                    }`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('draw_exit_zone');
+                    }}
+                  >
+                    3. Exit Zone ({zoneEditor.geometry.exitZones.length})
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${
+                      zoneEditor.mode === 'place_green_light' ? 'btn-success' : ''
+                    }`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('place_green_light');
+                    }}
+                  >
+                    4. Green Light
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${
+                      zoneEditor.mode === 'place_red_light' ? 'btn-danger' : ''
+                    }`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('place_red_light');
+                    }}
+                  >
+                    5. Red Light
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-compact ${zoneEditor.mode === 'select' ? 'btn-active' : ''}`}
+                    onClick={() => {
+                      zoneEditor.cancelDrawing();
+                      zoneEditor.setMode('select');
+                    }}
+                  >
+                    Move Vertex
+                  </button>
+                  <label className="crossing-toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={zoneEditor.geometry.crossingMode}
+                      onChange={(e) => zoneEditor.setCrossingMode(e.target.checked)}
+                    />
+                    3/4-Way Crossing Mode (3s Clearance + Exit Zone)
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={() => {
+                      const snap = transmitters.getChannelSnapshot(focusedCameraId);
+                      if (snap) setEditorSnapshotUrl(snap);
+                    }}
+                  >
+                    Grab Fresh Frame
+                  </button>
+                </div>
+              )}
+
               {focusedChannel.error && (
                 <div
                   style={{
@@ -805,8 +904,96 @@ export function App() {
                 </div>
               )}
 
+              {zoneSyncBanner && (
+                <div
+                  style={{
+                    padding: '0.45rem 1rem',
+                    background: 'var(--primary-soft)',
+                    borderBlockEnd: '1px solid var(--primary-border)',
+                    color: 'var(--primary-text)',
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  {zoneSyncBanner}
+                </div>
+              )}
+
               <div className="video-viewport">
-                {stream.latestFrameImage && stream.isCameraLive ? (
+                {isAnnotatingZones && auth.isAdmin ? (
+                  (() => {
+                    const annotationBg =
+                      editorSnapshotUrl ||
+                      transmitters.getChannelSnapshot(focusedCameraId) ||
+                      (stream.latestFrameImage
+                        ? `data:image/jpeg;base64,${stream.latestFrameImage}`
+                        : null);
+
+                    if (!annotationBg) {
+                      return (
+                        <div className="stream-placeholder">
+                          <span>No raw video frame captured yet for {focusedCameraId}</span>
+                          <span style={{ fontSize: '0.78rem', maxInlineSize: '56ch' }}>
+                            Click <strong>Select Video File...</strong> or{' '}
+                            <strong>Use Laptop Camera</strong> above to start a feed and annotate directly over the clean frame.
+                          </span>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <>
+                        <img
+                          className="stream-canvas"
+                          src={annotationBg}
+                          alt={`Clean annotation frame for ${focusedCameraId}`}
+                        />
+                        <canvas
+                          ref={zoneCanvasRef}
+                          width={DEFAULT_CAMERA_WIDTH}
+                          height={DEFAULT_CAMERA_HEIGHT}
+                          className="zone-canvas-overlay"
+                          style={{
+                            cursor:
+                              zoneEditor.mode === 'select'
+                                ? isDraggingVertex
+                                  ? 'grabbing'
+                                  : 'grab'
+                                : 'crosshair',
+                          }}
+                          onClick={(e) => {
+                            if (isDraggingVertex) return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            zoneEditor.handleCanvasClick(
+                              e.clientX,
+                              e.clientY,
+                              rect,
+                              DEFAULT_CAMERA_WIDTH,
+                              DEFAULT_CAMERA_HEIGHT
+                            );
+                          }}
+                          onMouseDown={() => {
+                            if (zoneEditor.mode === 'select' && zoneEditor.selectedVertex) {
+                              setIsDraggingVertex(true);
+                            }
+                          }}
+                          onMouseMove={(e) => {
+                            if (!isDraggingVertex || zoneEditor.mode !== 'select') return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            zoneEditor.handleVertexDrag(
+                              e.clientX,
+                              e.clientY,
+                              rect,
+                              DEFAULT_CAMERA_WIDTH,
+                              DEFAULT_CAMERA_HEIGHT
+                            );
+                          }}
+                          onMouseUp={() => setIsDraggingVertex(false)}
+                          onMouseLeave={() => setIsDraggingVertex(false)}
+                        />
+                      </>
+                    );
+                  })()
+                ) : stream.latestFrameImage && stream.isCameraLive ? (
                   <img
                     className="stream-canvas"
                     src={`data:image/jpeg;base64,${stream.latestFrameImage}`}
@@ -833,7 +1020,7 @@ export function App() {
                       <>
                         <span>Waiting for AI-annotated camera stream ({focusedCameraId})</span>
                         <span style={{ fontSize: '0.78rem' }}>
-                          Start a source on any camera slot below or above while the shared-YOLO AI module is connected
+                          Select a video file or laptop camera on any slot below while the shared-YOLO AI module is connected
                         </span>
                       </>
                     )}
@@ -841,28 +1028,229 @@ export function App() {
                 )}
               </div>
 
-              <div className="hud-wrapper">
-                <div className="hud-bar">
-                  <div className="stat-box">
-                    <div className="stat-label">Active Vehicles</div>
-                    <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
-                  </div>
-                  <div className="stat-box">
-                    <div className="stat-label">Total Tracked</div>
-                    <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
-                  </div>
-                  <div className="stat-box">
-                    <div className="stat-label">Violation Count</div>
-                    <div className="stat-value" style={{ color: 'var(--danger)' }}>
-                      {stream.telemetry.violations_count ?? mergedViolations.length}
+              {isAnnotatingZones && auth.isAdmin ? (
+                <div className="inline-zone-drawer">
+                  <div
+                    className="filter-bar"
+                    style={{
+                      justifyContent: 'space-between',
+                      padding: 0,
+                      borderBlockEnd: 'none',
+                      background: 'transparent',
+                    }}
+                  >
+                    <div className="toolbar-actions">
+                      <button
+                        type="button"
+                        className="btn btn-compact btn-success"
+                        disabled={zoneEditor.activeDrawingPoints.length < 3}
+                        onClick={() => zoneEditor.finishDrawing()}
+                      >
+                        Complete Polygon ({zoneEditor.activeDrawingPoints.length} pts)
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-compact"
+                        disabled={zoneEditor.activeDrawingPoints.length === 0}
+                        onClick={() => zoneEditor.cancelDrawing()}
+                      >
+                        Reset Points
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-compact"
+                        onClick={() => zoneEditor.deleteLastInActiveMode()}
+                      >
+                        Delete Last
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-compact"
+                        disabled={!zoneEditor.canUndo}
+                        onClick={() => zoneEditor.undo()}
+                      >
+                        Undo
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-compact"
+                        disabled={!zoneEditor.canRedo}
+                        onClick={() => zoneEditor.redo()}
+                      >
+                        Redo
+                      </button>
+                    </div>
+
+                    <div className="toolbar-actions">
+                      <span className="badge badge-standby">
+                        Profile:{' '}
+                        {focusedChannel.isBroadcasting
+                          ? focusedChannel.sourceKey
+                          : currentCamera?.activeSourceKey ||
+                            currentCamera?.config?.sourceKey ||
+                            `camera:${focusedCameraId}`}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-compact btn-danger"
+                        onClick={() => zoneEditor.resetAllZones()}
+                      >
+                        Clear All
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-compact btn-active"
+                        disabled={updateZonesMutation.isPending}
+                        onClick={handleSaveZones}
+                      >
+                        {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
+                      </button>
                     </div>
                   </div>
-                  <div className="stat-box">
-                    <div className="stat-label">Stream FPS</div>
-                    <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
+
+                  <div className="inline-zone-lists">
+                    <div>
+                      <div className="zone-section-title">
+                        Approach Lanes ({zoneEditor.geometry.lanes.length})
+                      </div>
+                      <div style={{ display: 'grid', gap: '0.35rem' }}>
+                        {zoneEditor.geometry.lanes.length === 0 ? (
+                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
+                            <span>No approach lanes.</span>
+                          </div>
+                        ) : (
+                          zoneEditor.geometry.lanes.map((lane, idx) => (
+                            <div key={idx} className="data-row">
+                              <span>
+                                <span
+                                  className="color-dot"
+                                  style={{ background: '#eab308', marginInlineEnd: '0.4rem' }}
+                                />
+                                <strong>Approach {idx + 1}</strong> ({lane.length} pts)
+                              </span>
+                              <button
+                                type="button"
+                                className="btn btn-compact btn-danger"
+                                onClick={() => zoneEditor.deleteLane(idx)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="zone-section-title">Intersection &amp; Exit Zones</div>
+                      <div style={{ display: 'grid', gap: '0.35rem' }}>
+                        {zoneEditor.geometry.intersection.length >= 3 ? (
+                          <div className="data-row">
+                            <span>
+                              <span
+                                className="color-dot"
+                                style={{ background: '#3b82f6', marginInlineEnd: '0.4rem' }}
+                              />
+                              <strong>Intersection</strong> ({zoneEditor.geometry.intersection.length}{' '}
+                              pts)
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-danger"
+                              onClick={() => zoneEditor.clearIntersection()}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
+                            <span>No intersection polygon.</span>
+                          </div>
+                        )}
+                        {zoneEditor.geometry.exitZones.map((ez, idx) => (
+                          <div key={idx} className="data-row">
+                            <span>
+                              <span
+                                className="color-dot"
+                                style={{ background: '#f97316', marginInlineEnd: '0.4rem' }}
+                              />
+                              <strong>Exit Zone {idx + 1}</strong> ({ez.length} pts)
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-danger"
+                              onClick={() => zoneEditor.deleteExitZone(idx)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="zone-section-title">
+                        Traffic Lights ({zoneEditor.geometry.lightBoxes.length})
+                      </div>
+                      <div style={{ display: 'grid', gap: '0.35rem' }}>
+                        {zoneEditor.geometry.lightBoxes.length === 0 ? (
+                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
+                            <span>No light points set.</span>
+                          </div>
+                        ) : (
+                          zoneEditor.geometry.lightBoxes.map((lb, idx) => (
+                            <div key={idx} className="data-row">
+                              <span>
+                                <span
+                                  className="color-dot"
+                                  style={{
+                                    background: lb.color === 'green' ? '#22c55e' : '#ef4444',
+                                    marginInlineEnd: '0.4rem',
+                                  }}
+                                />
+                                <strong style={{ textTransform: 'uppercase' }}>
+                                  {lb.color ?? 'red'}
+                                </strong>{' '}
+                                ({lb.x}, {lb.y})
+                              </span>
+                              <button
+                                type="button"
+                                className="btn btn-compact btn-danger"
+                                onClick={() => zoneEditor.deleteLightBox(idx)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="hud-wrapper">
+                  <div className="hud-bar">
+                    <div className="stat-box">
+                      <div className="stat-label">Active Vehicles</div>
+                      <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-label">Total Tracked</div>
+                      <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-label">Violation Count</div>
+                      <div className="stat-value" style={{ color: 'var(--danger)' }}>
+                        {stream.telemetry.violations_count ?? mergedViolations.length}
+                      </div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-label">Stream FPS</div>
+                      <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </section>
 
             {/* Multi-Source Camera Preview Wall (Raw Previews + Background AI Processing) */}
@@ -894,7 +1282,7 @@ export function App() {
                     id="new-cam-id"
                     type="text"
                     className="add-camera-input"
-                    placeholder="cam-04"
+                    placeholder="cam-07"
                     value={newCamId}
                     onChange={(e) => setNewCamId(e.target.value)}
                     required
@@ -906,7 +1294,7 @@ export function App() {
                     id="new-cam-name"
                     type="text"
                     className="add-camera-input"
-                    placeholder="Intersection 4"
+                    placeholder="Intersection 7"
                     value={newCamName}
                     onChange={(e) => setNewCamName(e.target.value)}
                     required
@@ -944,7 +1332,6 @@ export function App() {
                   const isAiOnline = stream.activeCameras.includes(cam.id);
                   const isFocused = focusedCameraId === cam.id;
                   const camLightCfg = getLightConfig(camTelemetry?.light_state);
-                  const selectId = `tile-source-${cam.id}`;
 
                   return (
                     <article
@@ -963,7 +1350,7 @@ export function App() {
                             <span>
                               No active source on <strong>{cam.id}</strong>
                               <br />
-                              Pick a source below to feed the AI layer
+                              Select a video or webcam below
                             </span>
                           </div>
                         )}
@@ -981,15 +1368,14 @@ export function App() {
                       <div className="camera-tile-telemetry">
                         <span>Vehicles: {camTelemetry?.vehicle_count ?? 0}</span>
                         <span>Tracked: {camTelemetry?.total_tracked ?? 0}</span>
-                        <span>Violations: {camTelemetry?.violations_count ?? cam.violationCount ?? 0}</span>
+                        <span>
+                          Violations: {camTelemetry?.violations_count ?? cam.violationCount ?? 0}
+                        </span>
                         <span style={{ color: camLightCfg.color }}>{camLightCfg.label}</span>
                       </div>
 
                       <footer className="camera-tile-footer">
                         <div className="camera-tile-controls">
-                          <label htmlFor={selectId} style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                            Source:
-                          </label>
                           <input
                             ref={(el) => {
                               tileFileInputsRef.current[cam.id] = el;
@@ -1000,42 +1386,32 @@ export function App() {
                             onChange={(e) => {
                               const file = e.target.files?.[0];
                               if (file) {
+                                if (isFocused) setEditorSnapshotUrl(null);
                                 void transmitters.startVideoFileStream(cam.id, file);
                                 e.target.value = '';
                               }
                             }}
                           />
-                          <select
-                            id={selectId}
-                            className="btn btn-compact"
-                            value={ch.sourcePreset}
-                            onChange={(e) => {
-                              const val = e.target.value as
-                                | 'test_1.mp4'
-                                | 'test_2.mp4'
-                                | 'test_3.mp4'
-                                | 'custom_file'
-                                | 'laptop_webcam';
-                              transmitters.setSourcePreset(cam.id, val);
-                              if (val === 'custom_file') {
-                                tileFileInputsRef.current[cam.id]?.click();
-                              } else if (val === 'laptop_webcam') {
-                                void transmitters.startLaptopCameraStream(cam.id);
-                              } else {
-                                void transmitters.startSampleVideoStream(cam.id, val);
-                              }
+                          <button
+                            type="button"
+                            className="btn btn-compact btn-active"
+                            onClick={() => tileFileInputsRef.current[cam.id]?.click()}
+                          >
+                            {ch.sourceType === 'video_file' ? 'Change Video...' : 'Select Video...'}
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn btn-compact ${
+                              ch.sourceType === 'laptop_webcam' ? 'btn-active' : ''
+                            }`}
+                            onClick={() => {
+                              if (isFocused) setEditorSnapshotUrl(null);
+                              void transmitters.startLaptopCameraStream(cam.id);
                             }}
                           >
-                            <option value="test_1.mp4">test_1.mp4</option>
-                            <option value="test_2.mp4">test_2.mp4</option>
-                            <option value="test_3.mp4">test_3.mp4</option>
-                            <option value="custom_file">Custom File...</option>
-                            <option value="laptop_webcam">Laptop Webcam</option>
-                          </select>
-                        </div>
-
-                        <div className="camera-tile-controls">
-                          {ch.isBroadcasting ? (
+                            Webcam
+                          </button>
+                          {ch.isBroadcasting && (
                             <button
                               type="button"
                               className="btn btn-compact btn-danger"
@@ -1043,29 +1419,18 @@ export function App() {
                             >
                               Stop
                             </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn btn-compact btn-success"
-                              onClick={() => {
-                                const p = ch.sourcePreset;
-                                if (p === 'custom_file') {
-                                  tileFileInputsRef.current[cam.id]?.click();
-                                } else if (p === 'laptop_webcam') {
-                                  void transmitters.startLaptopCameraStream(cam.id);
-                                } else {
-                                  void transmitters.startSampleVideoStream(cam.id, p);
-                                }
-                              }}
-                            >
-                              Start Feed
-                            </button>
                           )}
+                        </div>
 
+                        <div className="camera-tile-controls">
                           <button
                             type="button"
-                            className={`btn btn-compact ${isFocused ? 'btn-active' : ''}`}
-                            onClick={() => stream.setSelectedCamera(cam.id)}
+                            className={`btn btn-compact ${isFocused && !isAnnotatingZones ? 'btn-active' : ''}`}
+                            onClick={() => {
+                              setIsAnnotatingZones(false);
+                              setEditorSnapshotUrl(null);
+                              stream.setSelectedCamera(cam.id);
+                            }}
                           >
                             {isFocused ? 'In AI Focus' : 'Inspect AI'}
                           </button>
@@ -1073,13 +1438,10 @@ export function App() {
                           {auth.isAdmin && (
                             <button
                               type="button"
-                              className="btn btn-compact"
-                              onClick={() => {
-                                stream.setSelectedCamera(cam.id);
-                                setActiveTab('zones');
-                              }}
+                              className={`btn btn-compact ${isFocused && isAnnotatingZones ? 'btn-warning' : ''}`}
+                              onClick={() => toggleAnnotationMode(cam.id, true)}
                             >
-                              Zones
+                              Annotate Zones
                             </button>
                           )}
                         </div>
@@ -1250,364 +1612,6 @@ export function App() {
         </main>
       )}
 
-      {activeTab === 'zones' && auth.isAdmin && (
-        <main className="workspace-grid">
-          {/* Left Column: Interactive 854x480 Zone Drawing Canvas */}
-          <section className="card card-stream" aria-labelledby="zone-editor-title">
-            <div className="card-header">
-              <span id="zone-editor-title">
-                Interactive Camera Zone Editor ({focusedCameraId} — 854x480)
-              </span>
-              <div className="toolbar-actions">
-                <label htmlFor="zone-camera-select" style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                  Camera:
-                </label>
-                <select
-                  id="zone-camera-select"
-                  className="btn btn-compact"
-                  value={focusedCameraId}
-                  onChange={(e) => {
-                    initializedCameraConfigRef.current = null;
-                    stream.setSelectedCamera(e.target.value);
-                  }}
-                >
-                  {cameraSlots.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.id} ({c.name})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className={`btn btn-compact ${!useLiveFrameInEditor ? 'btn-active' : ''}`}
-                  onClick={() => setUseLiveFrameInEditor(false)}
-                >
-                  Reference Frame
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn-compact ${useLiveFrameInEditor ? 'btn-active' : ''}`}
-                  onClick={() => setUseLiveFrameInEditor(true)}
-                >
-                  Live Stream Frame
-                </button>
-              </div>
-            </div>
-
-            <div className="filter-bar" role="group" aria-label="Zone drawing mode">
-              <button
-                type="button"
-                className={`btn btn-compact ${zoneEditor.mode === 'draw_lane' ? 'btn-warning' : ''}`}
-                onClick={() => {
-                  zoneEditor.cancelDrawing();
-                  zoneEditor.setMode('draw_lane');
-                }}
-              >
-                1. Draw Lane ({zoneEditor.geometry.lanes.length})
-              </button>
-              <button
-                type="button"
-                className={`btn btn-compact ${
-                  zoneEditor.mode === 'draw_intersection' ? 'btn-active' : ''
-                }`}
-                onClick={() => {
-                  zoneEditor.cancelDrawing();
-                  zoneEditor.setMode('draw_intersection');
-                }}
-              >
-                2. Draw Intersection ({zoneEditor.geometry.intersection.length} pts)
-              </button>
-              <button
-                type="button"
-                className={`btn btn-compact ${
-                  zoneEditor.mode === 'place_green_light' ? 'btn-success' : ''
-                }`}
-                onClick={() => {
-                  zoneEditor.cancelDrawing();
-                  zoneEditor.setMode('place_green_light');
-                }}
-              >
-                3. Green Light Point
-              </button>
-              <button
-                type="button"
-                className={`btn btn-compact ${
-                  zoneEditor.mode === 'place_red_light' ? 'btn-danger' : ''
-                }`}
-                onClick={() => {
-                  zoneEditor.cancelDrawing();
-                  zoneEditor.setMode('place_red_light');
-                }}
-              >
-                4. Red Light Point
-              </button>
-              <button
-                type="button"
-                className={`btn btn-compact ${zoneEditor.mode === 'select' ? 'btn-active' : ''}`}
-                onClick={() => {
-                  zoneEditor.cancelDrawing();
-                  zoneEditor.setMode('select');
-                }}
-              >
-                Select / Move Vertex
-              </button>
-            </div>
-
-            <div className="video-viewport">
-              <img
-                className="stream-canvas"
-                src={
-                  useLiveFrameInEditor && stream.latestFrameByCamera[focusedCameraId]
-                    ? `data:image/jpeg;base64,${stream.latestFrameByCamera[focusedCameraId]}`
-                    : transmitters.getChannelSnapshot(focusedCameraId) || '/cam-01-reference.jpg'
-                }
-                alt={`Reference frame for ${focusedCameraId} zone configuration`}
-              />
-              <canvas
-                ref={zoneCanvasRef}
-                width={DEFAULT_CAMERA_WIDTH}
-                height={DEFAULT_CAMERA_HEIGHT}
-                className="zone-canvas-overlay"
-                style={{
-                  cursor:
-                    zoneEditor.mode === 'select'
-                      ? isDraggingVertex
-                        ? 'grabbing'
-                        : 'grab'
-                      : 'crosshair',
-                }}
-                onClick={(e) => {
-                  if (isDraggingVertex) return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  zoneEditor.handleCanvasClick(
-                    e.clientX,
-                    e.clientY,
-                    rect,
-                    DEFAULT_CAMERA_WIDTH,
-                    DEFAULT_CAMERA_HEIGHT
-                  );
-                }}
-                onMouseDown={() => {
-                  if (zoneEditor.mode === 'select' && zoneEditor.selectedVertex) {
-                    setIsDraggingVertex(true);
-                  }
-                }}
-                onMouseMove={(e) => {
-                  if (!isDraggingVertex || zoneEditor.mode !== 'select') return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  zoneEditor.handleVertexDrag(
-                    e.clientX,
-                    e.clientY,
-                    rect,
-                    DEFAULT_CAMERA_WIDTH,
-                    DEFAULT_CAMERA_HEIGHT
-                  );
-                }}
-                onMouseUp={() => setIsDraggingVertex(false)}
-                onMouseLeave={() => setIsDraggingVertex(false)}
-              />
-            </div>
-
-            <div className="hud-wrapper">
-              <div
-                className="filter-bar"
-                style={{ justifyContent: 'space-between', borderBlockEnd: 'none' }}
-              >
-                <div className="toolbar-actions">
-                  <button
-                    type="button"
-                    className="btn btn-compact btn-success"
-                    disabled={zoneEditor.activeDrawingPoints.length < 3}
-                    onClick={() => zoneEditor.finishDrawing()}
-                  >
-                    Complete Polygon ({zoneEditor.activeDrawingPoints.length} pts)
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    disabled={zoneEditor.activeDrawingPoints.length === 0}
-                    onClick={() => zoneEditor.cancelDrawing()}
-                  >
-                    Reset Current Points
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    onClick={() => zoneEditor.deleteLastInActiveMode()}
-                  >
-                    Delete Last in Mode
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    disabled={!zoneEditor.canUndo}
-                    onClick={() => zoneEditor.undo()}
-                  >
-                    Undo
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    disabled={!zoneEditor.canRedo}
-                    onClick={() => zoneEditor.redo()}
-                  >
-                    Redo
-                  </button>
-                </div>
-
-                <div className="toolbar-actions">
-                  <button
-                    type="button"
-                    className="btn btn-compact btn-danger"
-                    onClick={() => zoneEditor.resetAllZones()}
-                  >
-                    Clear All
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact btn-active"
-                    disabled={updateZonesMutation.isPending}
-                    onClick={handleSaveZones}
-                  >
-                    {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Right Column: Zone Coordinates Inspector & Sync Status */}
-          <aside className="card card-sidebar" aria-labelledby="zone-inspector-title">
-            <div className="card-header">
-              <span id="zone-inspector-title">Zone Geometry Inspector</span>
-              <span className="badge badge-standby">
-                v{currentCamera?.config?.version ?? 1}
-              </span>
-            </div>
-
-            <div className="filter-bar" style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              Click on the frame to add polygon vertices (minimum 3 points) or place 25x25px HSV traffic light sampling windows. Click the first vertex or &ldquo;Complete Polygon&rdquo; to close a zone.
-            </div>
-
-            <div className="evidence-feed" style={{ padding: 'var(--space-md)' }}>
-              {zoneSyncBanner && (
-                <div
-                  style={{
-                    padding: '0.6rem 0.75rem',
-                    borderRadius: 'var(--radius-sm)',
-                    background: 'var(--primary-soft)',
-                    border: '1px solid var(--primary-border)',
-                    color: 'var(--primary-text)',
-                    fontSize: '0.8rem',
-                  }}
-                >
-                  {zoneSyncBanner}
-                </div>
-              )}
-
-              <div>
-                <div className="zone-section-title">
-                  Lanes ({zoneEditor.geometry.lanes.length}) — Pre-Intersection Entry Zones
-                </div>
-                <div style={{ display: 'grid', gap: '0.4rem' }}>
-                  {zoneEditor.geometry.lanes.length === 0 ? (
-                    <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                      <span>No lane polygons configured.</span>
-                    </div>
-                  ) : (
-                    zoneEditor.geometry.lanes.map((lane, idx) => (
-                      <div key={idx} className="data-row">
-                        <div>
-                          <span
-                            className="color-dot"
-                            style={{ background: '#eab308', marginInlineEnd: '0.45rem' }}
-                          />
-                          <strong>Lane {idx + 1}</strong> ({lane.length} vertices)
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-compact btn-danger"
-                          onClick={() => zoneEditor.deleteLane(idx)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <div className="zone-section-title">
-                  Intersection Polygon — Violation Trigger Zone
-                </div>
-                {zoneEditor.geometry.intersection.length >= 3 ? (
-                  <div className="data-row">
-                    <div>
-                      <span
-                        className="color-dot"
-                        style={{ background: '#3b82f6', marginInlineEnd: '0.45rem' }}
-                      />
-                      <strong>Intersection</strong> ({zoneEditor.geometry.intersection.length}{' '}
-                      vertices)
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-compact btn-danger"
-                      onClick={() => zoneEditor.clearIntersection()}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                ) : (
-                  <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                    <span>No intersection polygon configured.</span>
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <div className="zone-section-title">
-                  Traffic Light Sampling Points ({zoneEditor.geometry.lightBoxes.length})
-                </div>
-                <div style={{ display: 'grid', gap: '0.4rem' }}>
-                  {zoneEditor.geometry.lightBoxes.length === 0 ? (
-                    <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                      <span>No traffic light points configured.</span>
-                    </div>
-                  ) : (
-                    zoneEditor.geometry.lightBoxes.map((lb, idx) => (
-                      <div key={idx} className="data-row">
-                        <div>
-                          <span
-                            className="color-dot"
-                            style={{
-                              background: lb.color === 'green' ? '#22c55e' : '#ef4444',
-                              marginInlineEnd: '0.45rem',
-                            }}
-                          />
-                          <strong style={{ textTransform: 'uppercase' }}>
-                            {lb.color ?? 'red'} Light
-                          </strong>{' '}
-                          — ({lb.x}, {lb.y})
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-compact btn-danger"
-                          onClick={() => zoneEditor.deleteLightBox(idx)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          </aside>
-        </main>
-      )}
-
       {activeTab === 'analytics' && (
         <main className="workspace-single">
           <section className="kpi-grid" aria-label="Key metrics">
@@ -1668,12 +1672,9 @@ export function App() {
                           <button
                             type="button"
                             className="btn btn-compact"
-                            onClick={() => {
-                              stream.setSelectedCamera(cam.id);
-                              setActiveTab('zones');
-                            }}
+                            onClick={() => toggleAnnotationMode(cam.id, true)}
                           >
-                            Edit Zones
+                            Annotate Zones
                           </button>
                         )}
                         <span className={`badge ${cam.isLive ? 'badge-live' : 'badge-standby'}`}>

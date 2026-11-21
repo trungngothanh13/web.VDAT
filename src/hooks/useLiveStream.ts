@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { vdatWsClient } from '../websocket/client';
 import { useStreamStore } from '../stores/stream.store';
+import { CAMERAS_QUERY_KEY } from './useCameras';
 
 export interface UseLiveStreamOptions {
   cameraId?: string;
@@ -8,6 +10,7 @@ export interface UseLiveStreamOptions {
 }
 
 export function useLiveStream(options?: UseLiveStreamOptions) {
+  const queryClient = useQueryClient();
   const store = useStreamStore();
   const optionsCameraId = options?.cameraId;
   const autoConnect = options?.autoConnect ?? true;
@@ -52,7 +55,19 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.handleConnectionEstablished(msg);
     });
 
-    unsubscribeRefs.current = [unsubStatus, unsubFrame, unsubTelemetry, unsubCamStatus, unsubConn];
+    // Refresh camera profile configs when a slot auto-binds to a new source
+    const unsubProfile = vdatWsClient.onCameraProfileSwitched(() => {
+      void queryClient.invalidateQueries({ queryKey: [CAMERAS_QUERY_KEY] });
+    });
+
+    unsubscribeRefs.current = [
+      unsubStatus,
+      unsubFrame,
+      unsubTelemetry,
+      unsubCamStatus,
+      unsubConn,
+      unsubProfile,
+    ];
 
     return () => {
       for (const unsub of unsubscribeRefs.current) {

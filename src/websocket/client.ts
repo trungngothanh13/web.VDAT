@@ -5,6 +5,7 @@ import {
   StreamConnectionStatus,
   LiveFrameMessage,
   CameraTelemetryMessage,
+  CameraProfileSwitchedMessage,
   ViolationAlertMessage,
   EvidenceClipUpdateMessage,
   CameraStatusMessage,
@@ -27,6 +28,7 @@ export class VdatWebSocketClient {
   // Event listener registries
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
   private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
+  private cameraProfileListeners = new Set<MessageHandler<CameraProfileSwitchedMessage>>();
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
   private evidenceClipListeners = new Set<MessageHandler<EvidenceClipUpdateMessage>>();
   private cameraStatusListeners = new Set<MessageHandler<CameraStatusMessage>>();
@@ -129,6 +131,10 @@ export class VdatWebSocketClient {
     }
   }
 
+  public getBufferedAmount(): number {
+    return this.ws ? this.ws.bufferedAmount : 0;
+  }
+
   public sendPayload(payload: Record<string, unknown>): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(payload));
@@ -146,6 +152,11 @@ export class VdatWebSocketClient {
   public onCameraTelemetry(handler: MessageHandler<CameraTelemetryMessage>): () => void {
     this.cameraTelemetryListeners.add(handler);
     return () => this.cameraTelemetryListeners.delete(handler);
+  }
+
+  public onCameraProfileSwitched(handler: MessageHandler<CameraProfileSwitchedMessage>): () => void {
+    this.cameraProfileListeners.add(handler);
+    return () => this.cameraProfileListeners.delete(handler);
   }
 
   public onViolationAlert(handler: MessageHandler<ViolationAlertMessage>): () => void {
@@ -194,6 +205,9 @@ export class VdatWebSocketClient {
         break;
       case 'camera_telemetry':
         for (const listener of this.cameraTelemetryListeners) listener(msg);
+        break;
+      case 'camera_profile_switched':
+        for (const listener of this.cameraProfileListeners) listener(msg);
         break;
       case 'violation_alert':
         for (const listener of this.violationAlertListeners) listener(msg);
