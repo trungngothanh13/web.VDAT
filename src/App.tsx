@@ -838,7 +838,7 @@ export function App() {
                     className={`btn btn-compact ${zoneEditor.mode === 'draw_lane' ? 'btn-warning' : ''}`}
                     onClick={() => zoneEditor.setMode('draw_lane')}
                   >
-                    1. Approach Lane ({zoneEditor.geometry.lanes.length})
+                    Approach Lane ({zoneEditor.geometry.lanes.length})
                   </button>
                   <button
                     type="button"
@@ -847,7 +847,7 @@ export function App() {
                     }`}
                     onClick={() => zoneEditor.setMode('draw_intersection')}
                   >
-                    2. Intersection ({zoneEditor.geometry.intersection.length} pts)
+                    Intersection ({zoneEditor.geometry.intersection.length} pts)
                   </button>
                   <button
                     type="button"
@@ -856,7 +856,7 @@ export function App() {
                     }`}
                     onClick={() => zoneEditor.setMode('draw_exit_zone')}
                   >
-                    3. Exit Zone ({zoneEditor.geometry.exitZones.length})
+                    Exit Zone ({zoneEditor.geometry.exitZones.length})
                   </button>
                   <button
                     type="button"
@@ -865,7 +865,7 @@ export function App() {
                     }`}
                     onClick={() => zoneEditor.setMode('place_green_light')}
                   >
-                    4. Green Light
+                    Green Light
                   </button>
                   <button
                     type="button"
@@ -874,7 +874,7 @@ export function App() {
                     }`}
                     onClick={() => zoneEditor.setMode('place_red_light')}
                   >
-                    5. Red Light
+                    Red Light
                   </button>
                   <button
                     type="button"
@@ -955,9 +955,8 @@ export function App() {
                     const annotationBg =
                       editorSnapshotUrl ||
                       transmitters.getChannelSnapshot(focusedCameraId) ||
-                      (stream.latestFrameImage
-                        ? `data:image/jpeg;base64,${stream.latestFrameImage}`
-                        : null);
+                      stream.latestFrameImage ||
+                      null;
 
                     if (!annotationBg) {
                       return (
@@ -1035,7 +1034,7 @@ export function App() {
                 ) : stream.latestFrameImage && stream.isCameraLive ? (
                   <img
                     className="stream-canvas"
-                    src={`data:image/jpeg;base64,${stream.latestFrameImage}`}
+                    src={stream.latestFrameImage}
                     alt={`Live AI feed from ${focusedCameraId}`}
                   />
                 ) : (
@@ -1379,7 +1378,7 @@ export function App() {
                     >
                       <div className="camera-tile-media">
                         <canvas
-                          ref={(el) => transmitters.bindPreviewCanvas(cam.id, el)}
+                          ref={transmitters.getPreviewCanvasRef(cam.id)}
                           width={427}
                           height={240}
                           className="camera-tile-canvas"

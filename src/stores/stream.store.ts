@@ -18,6 +18,28 @@ const DEFAULT_TELEMETRY: FrameTelemetry = {
   light_state: 'unknown',
 };
 
+const UNFOCUSED_TELEMETRY_THROTTLE_MS = 250;
+const lastTelemetryUpdateAt: Record<string, number> = {};
+
+function normalizeFrameSrc(image: string): string {
+  if (image.startsWith('blob:') || image.startsWith('data:')) {
+    return image;
+  }
+  return `data:image/jpeg;base64,${image}`;
+}
+
+function revokeBlobUrlSoon(url?: string | null): void {
+  if (url && url.startsWith('blob:')) {
+    setTimeout(() => {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // Ignore already-revoked URLs
+      }
+    }, 250);
+  }
+}
+
 interface StreamStoreState {
   selectedCameraId: string;
   activeCameras: string[];
@@ -77,7 +99,13 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
 
   handleLiveFrame: (msg: LiveFrameMessage) => {
     const { selectedCameraId, isPaused, latestFrameByCamera, telemetryByCamera } = get();
-    const updatedFrames = { ...latestFrameByCamera, [msg.cameraId]: msg.image };
+    const nextSrc = normalizeFrameSrc(msg.image);
+    const prevSrc = latestFrameByCamera[msg.cameraId];
+    if (prevSrc && prevSrc !== nextSrc) {
+      revokeBlobUrlSoon(prevSrc);
+    }
+
+    const updatedFrames = { ...latestFrameByCamera, [msg.cameraId]: nextSrc };
     const updatedTelemetry = msg.telemetry
       ? { ...telemetryByCamera, [msg.cameraId]: msg.telemetry }
       : telemetryByCamera;
@@ -86,7 +114,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       set({
         latestFrameByCamera: updatedFrames,
         telemetryByCamera: updatedTelemetry,
-        latestFrameImage: msg.image,
+        latestFrameImage: nextSrc,
         telemetry: msg.telemetry || { ...DEFAULT_TELEMETRY },
         lastFrameTimestamp: msg.timestamp || Date.now(),
         streamFps: msg.telemetry?.fps ?? get().streamFps,
@@ -101,14 +129,31 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
 
   handleCameraTelemetry: (msg: CameraTelemetryMessage) => {
     if (!msg.telemetry) return;
-    set((state) => {
-      const updatedTelemetry = { ...state.telemetryByCamera, [msg.cameraId]: msg.telemetry };
+    const state = get();
+    const isFocused = msg.cameraId === state.selectedCameraId;
+    const prevTel = state.telemetryByCamera[msg.cameraId];
+    const now = Date.now();
+
+    // Throttle unfocused wall telemetry updates so 6 cameras don't trigger 90 full React renders/sec
+    if (
+      !isFocused &&
+      prevTel &&
+      prevTel.violations_count === msg.telemetry.violations_count &&
+      prevTel.light_state === msg.telemetry.light_state &&
+      now - (lastTelemetryUpdateAt[msg.cameraId] ?? 0) < UNFOCUSED_TELEMETRY_THROTTLE_MS
+    ) {
+      return;
+    }
+    lastTelemetryUpdateAt[msg.cameraId] = now;
+
+    set((curr) => {
+      const updatedTelemetry = { ...curr.telemetryByCamera, [msg.cameraId]: msg.telemetry };
       return {
         telemetryByCamera: updatedTelemetry,
-        ...(msg.cameraId === state.selectedCameraId && !state.isPaused
+        ...(msg.cameraId === curr.selectedCameraId && !curr.isPaused
           ? {
               telemetry: msg.telemetry,
-              streamFps: msg.telemetry.fps ?? state.streamFps,
+              streamFps: msg.telemetry.fps ?? curr.streamFps,
             }
           : {}),
       };
@@ -124,6 +169,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       } else {
         activeSet.delete(msg.cameraId);
         const updatedFrames = { ...state.latestFrameByCamera };
+        revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
         delete updatedFrames[msg.cameraId];
         const isCurrentCam = msg.cameraId === state.selectedCameraId;
         return {
@@ -149,6 +195,10 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   },
 
   resetStream: () => {
+    const prevFrames = get().latestFrameByCamera;
+    for (const url of Object.values(prevFrames)) {
+      revokeBlobUrlSoon(url);
+    }
     set({
       latestFrameImage: null,
       latestFrameByCamera: {},

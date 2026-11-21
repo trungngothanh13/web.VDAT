@@ -24,6 +24,7 @@ export class VdatWebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingIntervalTimer: ReturnType<typeof setInterval> | null = null;
   private shouldReconnect = true;
+  private textDecoder = new TextDecoder();
 
   // Event listener registries
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
@@ -70,6 +71,7 @@ export class VdatWebSocketClient {
       const separator = this.url.includes('?') ? '&' : '?';
       const authenticatedUrl = `${this.url}${separator}token=${encodeURIComponent(token)}`;
       this.ws = new WebSocket(authenticatedUrl);
+      this.ws.binaryType = 'arraybuffer';
 
       this.ws.onopen = () => {
         this.setStatus('connected');
@@ -79,6 +81,10 @@ export class VdatWebSocketClient {
 
       this.ws.onmessage = (event: MessageEvent) => {
         try {
+          if (event.data instanceof ArrayBuffer) {
+            this.routeBinaryMessage(event.data);
+            return;
+          }
           const msg = JSON.parse(event.data) as InboundWSMessage;
           this.routeMessage(msg);
         } catch {
@@ -143,6 +149,14 @@ export class VdatWebSocketClient {
     return false;
   }
 
+  public sendBinary(data: ArrayBuffer | Uint8Array): boolean {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
+      return true;
+    }
+    return false;
+  }
+
   // Event Subscription Methods
   public onLiveFrame(handler: MessageHandler<LiveFrameMessage>): () => void {
     this.liveFrameListeners.add(handler);
@@ -195,6 +209,28 @@ export class VdatWebSocketClient {
           console.error('[VdatWS] Status listener error:', e);
         }
       }
+    }
+  }
+
+  private routeBinaryMessage(buffer: ArrayBuffer): void {
+    if (buffer.byteLength < 4) return;
+    const view = new DataView(buffer);
+    const headerLen = view.getUint32(0, false);
+    if (headerLen <= 0 || 4 + headerLen > buffer.byteLength) return;
+
+    const headerStr = this.textDecoder.decode(new Uint8Array(buffer, 4, headerLen));
+    const header = JSON.parse(headerStr) as Record<string, any>;
+
+    if (header.type === 'live_frame') {
+      const jpegBytes = new Uint8Array(buffer, 4 + headerLen);
+      const blobUrl = URL.createObjectURL(new Blob([jpegBytes], { type: 'image/jpeg' }));
+      this.routeMessage({
+        type: 'live_frame',
+        cameraId: header.cameraId,
+        telemetry: header.telemetry,
+        image: blobUrl,
+        timestamp: header.timestamp || Date.now(),
+      } as LiveFrameMessage);
     }
   }
 

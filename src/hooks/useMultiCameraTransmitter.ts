@@ -25,10 +25,24 @@ interface CameraChannelRuntime {
   objectUrl: string | null;
   timer: ReturnType<typeof setInterval> | null;
   frameCounter: number;
+  encodingInFlight: boolean;
+  lastUploadAt: number;
   previewCanvases: Set<HTMLCanvasElement>;
 }
 
 const MAX_WS_BUFFERED_BYTES = 512 * 1024; // Skip frame upload if WebSocket queue > 512 KB
+const UPLOAD_JPEG_QUALITY = 0.58;
+const textEncoder = new TextEncoder();
+
+function packBinarySourceFrame(header: Record<string, unknown>, jpegBytes: Uint8Array): Uint8Array {
+  const headerBytes = textEncoder.encode(JSON.stringify(header));
+  const out = new Uint8Array(4 + headerBytes.length + jpegBytes.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, headerBytes.length, false);
+  out.set(headerBytes, 4);
+  out.set(jpegBytes, 4 + headerBytes.length);
+  return out;
+}
 
 export function createInitialChannelState(cameraId: string): CameraChannelState {
   return {
@@ -92,6 +106,8 @@ export function useMultiCameraTransmitter() {
         objectUrl: null,
         timer: null,
         frameCounter: 0,
+        encodingInFlight: false,
+        lastUploadAt: 0,
         previewCanvases: new Set(),
       };
       runtimesRef.current.set(cameraId, runtime);
@@ -183,12 +199,8 @@ export function useMultiCameraTransmitter() {
       if (!ctx) return;
 
       runtime.frameCounter = 0;
-
-      // Adapt pacing when 4-8 cameras stream concurrently from the same browser tab
-      const activeBroadcastCount = Object.values(channelsRef.current).filter(
-        (c) => c.isBroadcasting
-      ).length;
-      const effectiveFps = activeBroadcastCount >= 3 ? Math.min(requestedFps, 10) : requestedFps;
+      runtime.encodingInFlight = false;
+      runtime.lastUploadAt = 0;
 
       vdatWsClient.sendPayload({
         type: 'source_init',
@@ -196,12 +208,12 @@ export function useMultiCameraTransmitter() {
         sourceType: activeType,
         sourceKey,
         label,
-        fps: effectiveFps,
+        fps: requestedFps,
         width: DEFAULT_CAMERA_WIDTH,
         height: DEFAULT_CAMERA_HEIGHT,
       });
 
-      const intervalMs = Math.max(33, Math.round(1000 / effectiveFps));
+      const tickMs = Math.max(33, Math.round(1000 / Math.max(10, requestedFps)));
       runtime.timer = setInterval(() => {
         const { video, canvas, previewCanvases } = runtime;
         if (video.paused || video.ended || video.readyState < 2) {
@@ -210,7 +222,7 @@ export function useMultiCameraTransmitter() {
 
         ctx.drawImage(video, 0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
 
-        // Always render lightweight raw preview onto mounted multi-camera wall canvases
+        // Always render smooth raw preview onto mounted multi-camera wall canvases
         for (const pCanvas of previewCanvases) {
           const pCtx = pCanvas.getContext('2d');
           if (pCtx) {
@@ -218,31 +230,64 @@ export function useMultiCameraTransmitter() {
           }
         }
 
-        // Backpressure check: avoid encoding/queuing frames if WebSocket uplink is congested
-        if (vdatWsClient.getBufferedAmount() > MAX_WS_BUFFERED_BYTES) {
+        // Adapt uplink pacing dynamically as streams are added/stopped (15/12/10 FPS)
+        const activeCount = Object.values(channelsRef.current).filter((c) => c.isBroadcasting).length;
+        const effectiveFps =
+          activeCount >= 5 ? Math.min(requestedFps, 10) : activeCount >= 3 ? Math.min(requestedFps, 12) : requestedFps;
+        const minUploadMs = Math.round(1000 / Math.max(1, effectiveFps));
+        const now = performance.now();
+
+        if (
+          runtime.encodingInFlight ||
+          now - runtime.lastUploadAt < minUploadMs - 8 ||
+          vdatWsClient.getBufferedAmount() > MAX_WS_BUFFERED_BYTES
+        ) {
           return;
         }
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.68);
-        const base64Img = dataUrl.split(',')[1];
-        if (!base64Img) return;
+        runtime.encodingInFlight = true;
+        runtime.lastUploadAt = now;
 
-        runtime.frameCounter += 1;
-        const count = runtime.frameCounter;
-        if (count === 1 || count % 5 === 0) {
-          updateChannel(cameraId, { transmittedFrames: count });
-        }
+        // Asynchronous off-main-thread JPEG encoding + zero-base64 binary WebSocket framing
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              runtime.encodingInFlight = false;
+              return;
+            }
+            blob
+              .arrayBuffer()
+              .then((ab) => {
+                runtime.frameCounter += 1;
+                const count = runtime.frameCounter;
+                if (count === 1 || count % 15 === 0) {
+                  updateChannel(cameraId, { transmittedFrames: count });
+                }
 
-        vdatWsClient.sendPayload({
-          type: 'source_frame',
-          cameraId,
-          sourceType: activeType,
-          frameNumber: count,
-          fps: effectiveFps,
-          timestamp: Number((count / effectiveFps).toFixed(2)),
-          image: base64Img,
-        });
-      }, intervalMs);
+                const packet = packBinarySourceFrame(
+                  {
+                    type: 'source_frame',
+                    cameraId,
+                    sourceType: activeType,
+                    frameNumber: count,
+                    fps: effectiveFps,
+                    timestamp: Number((count / effectiveFps).toFixed(2)),
+                  },
+                  new Uint8Array(ab)
+                );
+                vdatWsClient.sendBinary(packet);
+              })
+              .catch(() => {
+                // Ignore transient encode/read errors
+              })
+              .finally(() => {
+                runtime.encodingInFlight = false;
+              });
+          },
+          'image/jpeg',
+          UPLOAD_JPEG_QUALITY
+        );
+      }, tickMs);
     },
     [getRuntime, updateChannel]
   );
@@ -384,6 +429,22 @@ export function useMultiCameraTransmitter() {
     [getRuntime]
   );
 
+  const previewCanvasRefCallbacks = useRef<Map<string, (el: HTMLCanvasElement | null) => void>>(
+    new Map()
+  );
+
+  const getPreviewCanvasRef = useCallback(
+    (cameraId: string) => {
+      let cb = previewCanvasRefCallbacks.current.get(cameraId);
+      if (!cb) {
+        cb = (el: HTMLCanvasElement | null) => bindPreviewCanvas(cameraId, el);
+        previewCanvasRefCallbacks.current.set(cameraId, cb);
+      }
+      return cb;
+    },
+    [bindPreviewCanvas]
+  );
+
   const getChannelSnapshot = useCallback((cameraId: string): string | null => {
     const runtime = runtimesRef.current.get(cameraId);
     if (!runtime || runtime.video.readyState < 2) return null;
@@ -426,6 +487,7 @@ export function useMultiCameraTransmitter() {
     startLaptopCameraStream,
     stopBroadcast,
     bindPreviewCanvas,
+    getPreviewCanvasRef,
     getChannelSnapshot,
   };
 }
