@@ -4,6 +4,8 @@ import {
   InboundWSMessage,
   StreamConnectionStatus,
   LiveFrameMessage,
+  LiveOverlayMessage,
+  CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraProfileSwitchedMessage,
   ViolationAlertMessage,
@@ -30,6 +32,8 @@ export class VdatWebSocketClient {
 
   // Event listener registries
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
+  private liveOverlayListeners = new Set<MessageHandler<LiveOverlayMessage>>();
+  private cameraSourceStatusListeners = new Set<MessageHandler<CameraSourceStatusMessage>>();
   private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
   private cameraProfileListeners = new Set<MessageHandler<CameraProfileSwitchedMessage>>();
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
@@ -167,6 +171,16 @@ export class VdatWebSocketClient {
     return () => this.liveFrameListeners.delete(handler);
   }
 
+  public onLiveOverlay(handler: MessageHandler<LiveOverlayMessage>): () => void {
+    this.liveOverlayListeners.add(handler);
+    return () => this.liveOverlayListeners.delete(handler);
+  }
+
+  public onCameraSourceStatus(handler: MessageHandler<CameraSourceStatusMessage>): () => void {
+    this.cameraSourceStatusListeners.add(handler);
+    return () => this.cameraSourceStatusListeners.delete(handler);
+  }
+
   public onCameraTelemetry(handler: MessageHandler<CameraTelemetryMessage>): () => void {
     this.cameraTelemetryListeners.add(handler);
     return () => this.cameraTelemetryListeners.delete(handler);
@@ -252,6 +266,12 @@ export class VdatWebSocketClient {
     switch (msg.type) {
       case 'live_frame':
         for (const listener of this.liveFrameListeners) listener(msg);
+        break;
+      case 'live_overlay':
+        for (const listener of this.liveOverlayListeners) listener(msg);
+        break;
+      case 'camera_source_status':
+        for (const listener of this.cameraSourceStatusListeners) listener(msg);
         break;
       case 'camera_telemetry':
         for (const listener of this.cameraTelemetryListeners) listener(msg);

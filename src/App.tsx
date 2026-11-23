@@ -143,6 +143,7 @@ export function App() {
 
   const zoneEditor = useZoneEditor();
   const zoneCanvasRef = useRef<HTMLCanvasElement>(null);
+  const liveOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const initializedCameraConfigRef = useRef<string | null>(null);
   const initializedCameraSourceRef = useRef<string | null>(null);
 
@@ -672,6 +673,133 @@ export function App() {
     zoneEditor.selectedLaneIndex,
     zoneEditor.selectedExitIndex,
     zoneEditor.selectedVertex,
+  ]);
+
+  // Draw low-bandwidth webcam overlay (local buffered 854x480 frame + AI detections + zones)
+  useEffect(() => {
+    if (
+      activeTab !== 'monitor' ||
+      isAnnotatingZones ||
+      focusedChannel.sourceType !== 'laptop_webcam' ||
+      !stream.isCameraLive ||
+      !stream.latestOverlay
+    ) {
+      return;
+    }
+    const canvas = liveOverlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const frameCanvas = transmitters.getBufferedFrame(
+      focusedCameraId,
+      stream.latestOverlay.sourceFrameId
+    );
+    if (!frameCanvas) return;
+
+    ctx.clearRect(0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
+    ctx.drawImage(frameCanvas, 0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
+
+    // Draw saved zones over the local frame
+    const cfg = currentCamera?.config;
+    if (cfg) {
+      if (Array.isArray(cfg.lanes)) {
+        cfg.lanes.forEach((lane) => {
+          if (lane.length < 3) return;
+          ctx.beginPath();
+          ctx.moveTo(lane[0][0], lane[0][1]);
+          for (let i = 1; i < lane.length; i++) ctx.lineTo(lane[i][0], lane[i][1]);
+          ctx.closePath();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#ffff00';
+          ctx.stroke();
+        });
+      }
+      if (Array.isArray(cfg.intersection) && cfg.intersection.length >= 3) {
+        ctx.beginPath();
+        ctx.moveTo(cfg.intersection[0][0], cfg.intersection[0][1]);
+        for (let i = 1; i < cfg.intersection.length; i++) {
+          ctx.lineTo(cfg.intersection[i][0], cfg.intersection[i][1]);
+        }
+        ctx.closePath();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#00ffff';
+        ctx.stroke();
+      }
+      if (Array.isArray(cfg.exitZones)) {
+        cfg.exitZones.forEach((ez) => {
+          if (ez.length < 3) return;
+          ctx.beginPath();
+          ctx.moveTo(ez[0][0], ez[0][1]);
+          for (let i = 1; i < ez.length; i++) ctx.lineTo(ez[i][0], ez[i][1]);
+          ctx.closePath();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#ff8c00';
+          ctx.stroke();
+        });
+      }
+      if (Array.isArray(cfg.lightBox)) {
+        (cfg.lightBox as TrafficLightSamplingBox[]).forEach((lb) => {
+          ctx.beginPath();
+          ctx.arc(lb.x, lb.y, 3, 0, Math.PI * 2);
+          ctx.fillStyle = lb.color === 'green' ? '#22c55e' : '#ef4444';
+          ctx.fill();
+        });
+      }
+    }
+
+    const OVERLAY_COLORS: Record<string, string> = {
+      bike: '#ff32ff',
+      car: '#32e632',
+      moto: '#00d7ff',
+      bus: '#ff8c00',
+      truck: '#ffeb00',
+    };
+
+    const srcW = stream.latestOverlay.width || DEFAULT_CAMERA_WIDTH;
+    const srcH = stream.latestOverlay.height || DEFAULT_CAMERA_HEIGHT;
+    const scaleX = DEFAULT_CAMERA_WIDTH / srcW;
+    const scaleY = DEFAULT_CAMERA_HEIGHT / srcH;
+
+    const ordered = [...stream.latestOverlay.detections].sort((a, b) => a[6] - b[6]);
+    ctx.font = '600 11px Inter, sans-serif';
+    ctx.textBaseline = 'top';
+
+    for (const det of ordered) {
+      const [rx1, ry1, rx2, ry2, shortName, trackId, isViolFlag] = det;
+      const x1 = rx1 * scaleX;
+      const y1 = ry1 * scaleY;
+      const w = (rx2 - rx1) * scaleX;
+      const h = (ry2 - ry1) * scaleY;
+      const isViolation = isViolFlag === 1;
+      const color = isViolation ? '#ef4444' : OVERLAY_COLORS[shortName] || '#00ffff';
+      const label = isViolation ? `${shortName} #${trackId}` : shortName;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isViolation ? 2 : 1;
+      ctx.strokeRect(x1, y1, w, h);
+
+      const metrics = ctx.measureText(label);
+      const padX = 3;
+      const padY = 2;
+      const badgeW = metrics.width + padX * 2;
+      const badgeH = 13 + padY * 2;
+      const badgeY = Math.max(0, y1 - badgeH);
+      ctx.fillStyle = color;
+      ctx.fillRect(x1, badgeY, badgeW, badgeH);
+
+      ctx.fillStyle = isViolation ? '#ffffff' : '#000000';
+      ctx.fillText(label, x1 + padX, badgeY + padY);
+    }
+  }, [
+    activeTab,
+    isAnnotatingZones,
+    focusedChannel.sourceType,
+    focusedCameraId,
+    stream.isCameraLive,
+    stream.latestOverlay,
+    currentCamera?.config,
+    transmitters,
   ]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -1409,6 +1537,16 @@ export function App() {
                       </>
                     );
                   })()
+                ) : focusedChannel.sourceType === 'laptop_webcam' &&
+                  stream.isCameraLive &&
+                  stream.latestOverlay ? (
+                  <canvas
+                    ref={liveOverlayCanvasRef}
+                    width={DEFAULT_CAMERA_WIDTH}
+                    height={DEFAULT_CAMERA_HEIGHT}
+                    className="stream-canvas"
+                    aria-label={`Live AI feed from ${focusedCameraId}`}
+                  />
                 ) : stream.latestFrameImage && stream.isCameraLive ? (
                   <img
                     className="stream-canvas"
@@ -1418,12 +1556,23 @@ export function App() {
                 ) : (
                   <div className="stream-placeholder">
                     <div className="spinner" aria-hidden="true" />
-                    {focusedChannel.isBroadcasting && !stream.isCameraLive ? (
+                    {focusedChannel.uploadProgress !== null ? (
+                      <>
+                        <span style={{ color: 'var(--primary-text)', fontWeight: 600 }}>
+                          {focusedChannel.uploadProgress < 100
+                            ? `Uploading "${focusedChannel.sourceLabel}" to AI engine (${focusedChannel.uploadProgress}%)...`
+                            : `Syncing "${focusedChannel.sourceLabel}" to AI engine...`}
+                        </span>
+                        <span style={{ fontSize: '0.78rem', maxInlineSize: '60ch' }}>
+                          Video plays locally on the AI host once synced so zero uplink bandwidth is used during analysis.
+                        </span>
+                      </>
+                    ) : focusedChannel.isBroadcasting && !stream.isCameraLive ? (
                       <>
                         <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
-                          Feeding &ldquo;{focusedChannel.sourceLabel}&rdquo; (
-                          {focusedChannel.transmittedFrames} frames sent), but AI session for{' '}
-                          <code>{focusedCameraId}</code> is not connected
+                          {focusedChannel.isAiHostedVideo
+                            ? `Hosting "${focusedChannel.sourceLabel}" on ${focusedCameraId}, waiting for AI stream...`
+                            : `Feeding "${focusedChannel.sourceLabel}" (${focusedChannel.transmittedFrames} frames sent), but AI session for ${focusedCameraId} is not connected`}
                         </span>
                         <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
                           Start the multi-camera AI engine with{' '}
@@ -2343,7 +2492,12 @@ export function App() {
               {focusedChannel.isBroadcasting ? (
                 <>
                   Active: <strong>{focusedChannel.sourceLabel}</strong> (
-                  {focusedChannel.transmittedFrames} frames)
+                  {focusedChannel.uploadProgress !== null
+                    ? `Uploading ${focusedChannel.uploadProgress}%`
+                    : focusedChannel.isAiHostedVideo
+                      ? 'AI Hosted'
+                      : `${focusedChannel.transmittedFrames} frames`}
+                  )
                 </>
               ) : (
                 <>No active source connected on {focusedCameraId}.</>

@@ -58,7 +58,35 @@ export interface LiveFrameMessage {
   type: 'live_frame';
   cameraId: string;
   telemetry: FrameTelemetry;
-  image: string; // Base64 JPEG string
+  image: string; // Base64 JPEG string or blob URL
+  timestamp: number;
+}
+
+/** Compact tuple: [x1, y1, x2, y2, shortClass, trackId, isViolation(0|1)] */
+export type OverlayDetectionTuple = [number, number, number, number, string, number, number];
+
+export interface LiveOverlayPayload {
+  sourceFrameId?: number | null;
+  width: number;
+  height: number;
+  detections: OverlayDetectionTuple[];
+}
+
+export interface LiveOverlayMessage {
+  type: 'live_overlay';
+  cameraId: string;
+  overlay: LiveOverlayPayload;
+  telemetry: FrameTelemetry;
+  timestamp: number;
+}
+
+export interface CameraSourceStatusMessage {
+  type: 'camera_source_status';
+  cameraId: string;
+  status: 'playing' | 'stopped' | 'ended' | 'error';
+  sourceType?: string;
+  label?: string;
+  error?: string;
   timestamp: number;
 }
 
@@ -102,6 +130,8 @@ export type InboundWSMessage =
   | AiModelStatusMessage
   | AiTrackerStatusMessage
   | LiveFrameMessage
+  | LiveOverlayMessage
+  | CameraSourceStatusMessage
   | CameraTelemetryMessage
   | CameraProfileSwitchedMessage
   | ViolationAlertMessage
