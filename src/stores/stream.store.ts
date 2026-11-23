@@ -333,7 +333,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       activeCameras: msg.activeCameras || [],
       cameraPreviews: { ...state.cameraPreviews, ...initialPreviews },
       bypassZonesByCamera: msg.bypassZonesByCamera
-        ? { ...state.bypassZonesByCamera, ...msg.bypassZonesByCamera }
+        ? { ...msg.bypassZonesByCamera }
         : state.bypassZonesByCamera,
       modelStatus: msg.modelStatus
         ? {

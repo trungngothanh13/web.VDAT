@@ -1264,7 +1264,7 @@ export function App() {
                         type="button"
                         role="menuitemcheckbox"
                         aria-checked={Boolean(stream.bypassZonesByCamera[focusedCameraId])}
-                        disabled={!stream.isCameraLive}
+                        disabled={!stream.isConnected}
                         onKeyDown={handleCheckboxMenuKeyDown}
                         onClick={() => {
                           const currentlyBypassed = Boolean(
@@ -1628,8 +1628,15 @@ export function App() {
                   </div>
                   <div className="stat-box">
                     <div className="stat-label">Signal</div>
-                    <div className="stat-value" style={{ color: lightCfg.color }}>
-                      {lightCfg.label}
+                    <div
+                      className="stat-value"
+                      style={{
+                        color: stream.bypassZonesByCamera[focusedCameraId]
+                          ? 'var(--warning-text)'
+                          : lightCfg.color,
+                      }}
+                    >
+                      {stream.bypassZonesByCamera[focusedCameraId] ? 'BYPASSED' : lightCfg.label}
                     </div>
                   </div>
                 </div>
