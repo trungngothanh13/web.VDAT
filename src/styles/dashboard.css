@@ -916,6 +916,34 @@
     cursor: pointer;
   }
 
+  .clearance-control-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .clearance-seconds-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .clearance-seconds-input {
+    inline-size: 3.3rem;
+    background: rgba(0, 0, 0, 0.38);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding-block: 0.35rem;
+    padding-inline: 0.4rem;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    color: var(--text);
+  }
+
   /* Camera Title Popup Menu Trigger & Native Popover Menu */
   .cam-title-trigger {
     display: inline-flex;

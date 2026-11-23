@@ -31,7 +31,7 @@ function normalizeState(initial?: Partial<ZoneGeometryState>): ZoneGeometryState
     lightBoxes: (initial?.lightBoxes as TrafficLightSamplingBox[]) || [],
     crossingMode: Boolean(initial?.crossingMode),
     clearanceSeconds:
-      typeof initial?.clearanceSeconds === 'number' ? initial.clearanceSeconds : 3.0,
+      typeof initial?.clearanceSeconds === 'number' ? initial.clearanceSeconds : 0,
   };
 }
 

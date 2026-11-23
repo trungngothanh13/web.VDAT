@@ -96,7 +96,7 @@ export function useZoneAnnotation({
         exitZones: [],
         lightBoxes: [],
         crossingMode: false,
-        clearanceSeconds: 3.0,
+        clearanceSeconds: 0,
       });
       return;
     }
@@ -112,7 +112,7 @@ export function useZoneAnnotation({
       exitZones: Array.isArray(cfg.exitZones) ? cfg.exitZones : [],
       lightBoxes,
       crossingMode: Boolean(cfg.crossingMode),
-      clearanceSeconds: typeof cfg.clearanceSeconds === 'number' ? cfg.clearanceSeconds : 3.0,
+      clearanceSeconds: typeof cfg.clearanceSeconds === 'number' ? cfg.clearanceSeconds : 0,
     });
   }, [currentCamera, isAnnotatingZones, zoneEditor]);
 

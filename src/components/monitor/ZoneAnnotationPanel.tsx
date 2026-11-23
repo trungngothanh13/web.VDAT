@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import type { CameraChannelState } from '../../hooks/useMultiCameraTransmitter';
 import type { useZoneAnnotation } from '../../hooks/useZoneAnnotation';
 
@@ -16,6 +17,11 @@ export function ZoneAnnotationPanel({
 }: ZoneAnnotationPanelProps) {
   const { zoneEditor, currentCamera, isSaving, toggleAnnotationMode, grabFrame, saveZones } =
     annotation;
+  const lastClearanceRef = useRef<number>(5);
+  if (zoneEditor.geometry.clearanceSeconds > 0) {
+    lastClearanceRef.current = zoneEditor.geometry.clearanceSeconds;
+  }
+  const hasClearanceGrace = zoneEditor.geometry.clearanceSeconds > 0;
 
   return (
     <aside className="card annotate-sidebar" aria-labelledby="annotate-panel-title">
@@ -218,16 +224,65 @@ export function ZoneAnnotationPanel({
           </div>
         </div>
 
-        {/* 4. Multi-Lane Crossing Toggle */}
+        {/* 4. Independent Enforcement Rules */}
         <div className="annotate-section">
+          <div className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+            Enforcement Rules
+          </div>
+
           <label className="crossing-toggle-label" style={{ padding: '0.5rem 0.65rem' }}>
             <input
               type="checkbox"
               checked={zoneEditor.geometry.crossingMode}
               onChange={(e) => zoneEditor.setCrossingMode(e.target.checked)}
             />
-            <span>3/4-Way Multi-Lane Mode (3s Clearance + Exit Zone)</span>
+            <span>Split-Phase Signal (Require Exit Zone)</span>
           </label>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+            Requires vehicles to reach an Exit Zone (avoids false flags on protected turns).
+          </span>
+
+          <div className="clearance-control-row">
+            <label
+              className="crossing-toggle-label"
+              style={{ padding: '0.5rem 0.65rem', flex: 1 }}
+            >
+              <input
+                type="checkbox"
+                checked={hasClearanceGrace}
+                onChange={(e) =>
+                  zoneEditor.setClearanceSeconds(
+                    e.target.checked ? lastClearanceRef.current || 5 : 0
+                  )
+                }
+              />
+              <span>Red-Light Clearance Grace</span>
+            </label>
+            {hasClearanceGrace && (
+              <div className="clearance-seconds-wrap">
+                <input
+                  type="number"
+                  min={1}
+                  max={15}
+                  step={1}
+                  aria-label="Clearance grace duration in seconds"
+                  className="clearance-seconds-input"
+                  value={Math.round(zoneEditor.geometry.clearanceSeconds)}
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (Number.isNaN(parsed)) return;
+                    const clamped = Math.max(1, Math.min(15, parsed));
+                    lastClearanceRef.current = clamped;
+                    zoneEditor.setClearanceSeconds(clamped);
+                  }}
+                />
+                <span>s</span>
+              </div>
+            )}
+          </div>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+            Grants committed slow-moving traffic (1–15s) after green turns red to finish clearing.
+          </span>
         </div>
 
         {/* 5. Current Annotated Stats & Items */}
