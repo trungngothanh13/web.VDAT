@@ -50,6 +50,16 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.handleCameraStatus(msg);
     });
 
+    // Subscribe to live AI model toggle updates (trained vs stock legacy)
+    const unsubModelStatus = vdatWsClient.onAiModelStatus((msg) => {
+      store.handleAiModelStatus(msg);
+    });
+
+    // Subscribe to live AI tracker toggle updates (bytetrack / botsort / deepsort)
+    const unsubTrackerStatus = vdatWsClient.onAiTrackerStatus((msg) => {
+      store.handleAiTrackerStatus(msg);
+    });
+
     // Subscribe to connection established handshake
     const unsubConn = vdatWsClient.onConnectionEstablished((msg) => {
       store.handleConnectionEstablished(msg);
@@ -65,6 +75,8 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       unsubFrame,
       unsubTelemetry,
       unsubCamStatus,
+      unsubModelStatus,
+      unsubTrackerStatus,
       unsubConn,
       unsubProfile,
     ];
@@ -82,6 +94,8 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
   return {
     selectedCameraId: store.selectedCameraId,
     activeCameras: store.activeCameras,
+    modelStatus: store.modelStatus,
+    trackerStatus: store.trackerStatus,
     connectionStatus: store.connectionStatus,
     isConnected: store.connectionStatus === 'connected',
     isCameraLive,
@@ -93,6 +107,9 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     isPaused: store.isPaused,
     lastFrameTimestamp: store.lastFrameTimestamp,
     setSelectedCamera: (id: string) => store.setSelectedCamera(id),
+    switchAiModel: (profile: 'trained' | 'stock') => store.switchAiModel(profile),
+    switchAiTracker: (tracker: 'bytetrack' | 'botsort' | 'deepsort') =>
+      store.switchAiTracker(tracker),
     togglePause: () => store.togglePause(),
     setPaused: (paused: boolean) => store.setPaused(paused),
     reconnect: () => vdatWsClient.reconnect(),

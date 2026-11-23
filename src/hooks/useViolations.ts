@@ -11,6 +11,7 @@ export function useViolations(params?: ViolationQueryParams, enabled: boolean = 
     enabled,
     placeholderData: keepPreviousData,
     staleTime: 10000, // 10 seconds cache
+    refetchInterval: 60000, // Auto-refresh every 60s
     refetchOnWindowFocus: false,
   });
 }

@@ -8,6 +8,7 @@ import {
   useOverviewStats,
   useCameras,
   useCreateCamera,
+  useDeleteCameras,
   useUpdateZones,
   useZoneEditor,
   useAudioAlert,
@@ -15,7 +16,7 @@ import {
 } from './hooks';
 import { evidenceApi } from './api/evidence.api';
 import { exportViolationsToCsv } from './utils/export';
-import { formatConfidence, formatDateTime } from './utils/formatters';
+import { formatConfidence, formatDateTime, formatShortRelativeTime } from './utils/formatters';
 import {
   VIOLATION_STATUS_CONFIG,
   getLightConfig,
@@ -30,20 +31,33 @@ function bindDialogLightDismissFallback(dialog: HTMLDialogElement | null) {
   if (!dialog || typeof HTMLDialogElement === 'undefined') return () => {};
   if ('closedBy' in HTMLDialogElement.prototype) return () => {};
 
-  const handleClick = (event: MouseEvent) => {
-    if (event.target !== dialog) return;
+  const outside = (event: PointerEvent) => {
     const rect = dialog.getBoundingClientRect();
-    const isDialogContent =
-      rect.top <= event.clientY &&
-      event.clientY <= rect.top + rect.height &&
-      rect.left <= event.clientX &&
-      event.clientX <= rect.left + rect.width;
-    if (isDialogContent) return;
-    dialog.close();
+    return (
+      event.clientX < rect.left ||
+      event.clientX > rect.right ||
+      event.clientY < rect.top ||
+      event.clientY > rect.bottom
+    );
   };
 
-  dialog.addEventListener('click', handleClick);
-  return () => dialog.removeEventListener('click', handleClick);
+  let pressedOutside = false;
+  const handlePointerDown = (event: PointerEvent) => {
+    pressedOutside = outside(event);
+  };
+  const handlePointerUp = (event: PointerEvent) => {
+    if (pressedOutside && outside(event)) {
+      dialog.close();
+    }
+    pressedOutside = false;
+  };
+
+  dialog.addEventListener('pointerdown', handlePointerDown);
+  dialog.addEventListener('pointerup', handlePointerUp);
+  return () => {
+    dialog.removeEventListener('pointerdown', handlePointerDown);
+    dialog.removeEventListener('pointerup', handlePointerUp);
+  };
 }
 
 export function App() {
@@ -57,12 +71,13 @@ export function App() {
     mediaTab: 'video' | 'snapshot';
   } | null>(null);
 
-  // Multi-camera registration state (Admin)
-  const [showAddCamera, setShowAddCamera] = useState(false);
+  // Multi-camera Add / Delete dialog state (Admin)
   const [newCamId, setNewCamId] = useState('');
   const [newCamName, setNewCamName] = useState('');
   const [newCamLocation, setNewCamLocation] = useState('');
   const [addCameraError, setAddCameraError] = useState<string | null>(null);
+  const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
+  const [deleteCameraError, setDeleteCameraError] = useState<string | null>(null);
 
   // Sign-In Form State
   const [email, setEmail] = useState('admin@vdat.local');
@@ -80,10 +95,35 @@ export function App() {
   const transmitters = useMultiCameraTransmitter();
   const focusedCameraId = stream.selectedCameraId || 'cam-01';
   const focusedChannel = transmitters.getChannel(focusedCameraId);
-  const tileFileInputsRef = useRef<Record<string, HTMLInputElement | null>>({});
   const focusedFileInputRef = useRef<HTMLInputElement>(null);
   const alerts = useViolationAlerts();
   const audio = useAudioAlert();
+
+  // Camera title dropdown popover, user header popover & Choose/Change Source modal dialog refs
+  const camMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const camMenuPopoverRef = useRef<HTMLDivElement>(null);
+  const camMenuGroupRef = useRef<HTMLDivElement>(null);
+  const userMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const userMenuPopoverRef = useRef<HTMLDivElement>(null);
+  const userMenuGroupRef = useRef<HTMLDivElement>(null);
+  const sourceDialogRef = useRef<HTMLDialogElement>(null);
+  const manageCamerasDialogRef = useRef<HTMLDialogElement>(null);
+  const [isCamMenuOpen, setIsCamMenuOpen] = useState(false);
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const camMenuEnterOnOpenRef = useRef(false);
+  const userMenuEnterOnOpenRef = useRef(false);
+  const [relativeNowMs, setRelativeNowMs] = useState(() => Date.now());
+
+  // Keep "? mins ago" relative labels fresh automatically
+  useEffect(() => {
+    const timer = setInterval(() => setRelativeNowMs(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Auto-filter Violation Evidence sidebar to whichever camera the operator focuses on
+  useEffect(() => {
+    setCameraFilter(focusedCameraId);
+  }, [focusedCameraId]);
 
   const violationsQuery = useViolations(
     {
@@ -98,6 +138,7 @@ export function App() {
   const statsQuery = useOverviewStats(15000, auth.isAuthenticated);
   const camerasQuery = useCameras(auth.isAuthenticated);
   const createCameraMutation = useCreateCamera();
+  const deleteCamerasMutation = useDeleteCameras();
   const updateZonesMutation = useUpdateZones();
 
   const zoneEditor = useZoneEditor();
@@ -108,9 +149,283 @@ export function App() {
   const evidenceDialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
-    const cleanDialog = bindDialogLightDismissFallback(evidenceDialogRef.current);
-    return () => cleanDialog();
+    const cleanEvidenceDialog = bindDialogLightDismissFallback(evidenceDialogRef.current);
+    const cleanSourceDialog = bindDialogLightDismissFallback(sourceDialogRef.current);
+    const cleanManageCamerasDialog = bindDialogLightDismissFallback(manageCamerasDialogRef.current);
+    return () => {
+      cleanEvidenceDialog();
+      cleanSourceDialog();
+      cleanManageCamerasDialog();
+    };
   }, [auth.isAuthenticated]);
+
+  // Reusable native popover menu binding (Invoker Command, focusgroup & anchor-positioning fallbacks)
+  useEffect(() => {
+    const bindMenu = (
+      trigger: HTMLButtonElement | null,
+      pop: HTMLDivElement | null,
+      group: HTMLDivElement | null,
+      alignEnd: boolean,
+      setOpen: (open: boolean) => void,
+      enterRef: React.MutableRefObject<boolean>
+    ) => {
+      if (!pop || !trigger || !group) return () => {};
+
+      const getMenuItems = () =>
+        Array.from(group.querySelectorAll<HTMLButtonElement>('button')).filter(
+          (btn) => !btn.disabled && btn.getAttribute('aria-disabled') !== 'true'
+        );
+
+      const positionPopoverFallback = () => {
+        if (typeof CSS !== 'undefined' && CSS.supports('position-area: block-end')) return;
+        const rect = trigger.getBoundingClientRect();
+        const popRect = pop.getBoundingClientRect();
+        const gap = 6;
+        const spaceBelow = window.innerHeight - rect.bottom - gap;
+        const top =
+          spaceBelow >= popRect.height || rect.top < popRect.height
+            ? Math.min(rect.bottom + gap, Math.max(8, window.innerHeight - popRect.height - 8))
+            : Math.max(8, rect.top - popRect.height - gap);
+        const rawLeft = alignEnd ? rect.right - popRect.width : rect.left;
+        const left = Math.min(
+          Math.max(8, rawLeft),
+          Math.max(8, window.innerWidth - popRect.width - 8)
+        );
+        pop.style.left = `${left}px`;
+        pop.style.top = `${top}px`;
+      };
+
+      const handleToggle = (event: Event) => {
+        const nextOpen = (event as ToggleEvent).newState === 'open';
+        setOpen(nextOpen);
+        if (nextOpen) {
+          positionPopoverFallback();
+          if (enterRef.current) {
+            enterRef.current = false;
+            getMenuItems()[0]?.focus({ preventScroll: true });
+          }
+        }
+      };
+
+      const hasNativeFocusgroup = 'focusGroup' in HTMLElement.prototype;
+      if (!hasNativeFocusgroup) {
+        group.setAttribute('role', 'menu');
+        group.querySelectorAll('button:not([role])').forEach((btn) => {
+          btn.setAttribute('role', 'menuitem');
+        });
+      }
+
+      const handleGroupKeyDown = (event: KeyboardEvent) => {
+        if (event.key === 'Tab') {
+          try {
+            pop.hidePopover();
+          } catch {
+            // Ignore
+          }
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          try {
+            pop.hidePopover();
+          } catch {
+            // Ignore
+          }
+          trigger.focus({ preventScroll: true });
+          return;
+        }
+        if (hasNativeFocusgroup) return;
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        const items = getMenuItems();
+        if (items.length === 0) return;
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next =
+          event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? items.length - 1
+              : current < 0
+                ? 0
+                : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        items[next].focus({ preventScroll: true });
+      };
+
+      const handleTriggerKeyDown = (event: KeyboardEvent) => {
+        if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+          enterRef.current = true;
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          if (!pop.matches(':popover-open')) {
+            trigger.click();
+          } else {
+            getMenuItems()[0]?.focus({ preventScroll: true });
+          }
+        }
+      };
+
+      const handlePointerMove = (event: PointerEvent) => {
+        const target = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('button');
+        if (
+          target &&
+          group.contains(target) &&
+          !target.disabled &&
+          document.activeElement !== target
+        ) {
+          target.focus({ preventScroll: true });
+        }
+      };
+
+      const handleDocumentFocusIn = (event: FocusEvent) => {
+        if (!pop.matches(':popover-open')) return;
+        const target = event.target as Node | null;
+        if (target && !pop.contains(target) && target !== trigger) {
+          try {
+            pop.hidePopover();
+          } catch {
+            // Ignore
+          }
+        }
+      };
+
+      pop.addEventListener('toggle', handleToggle);
+      group.addEventListener('keydown', handleGroupKeyDown, true);
+      group.addEventListener('pointermove', handlePointerMove);
+      trigger.addEventListener('keydown', handleTriggerKeyDown);
+      document.addEventListener('focusin', handleDocumentFocusIn);
+
+      return () => {
+        pop.removeEventListener('toggle', handleToggle);
+        group.removeEventListener('keydown', handleGroupKeyDown, true);
+        group.removeEventListener('pointermove', handlePointerMove);
+        trigger.removeEventListener('keydown', handleTriggerKeyDown);
+        document.removeEventListener('focusin', handleDocumentFocusIn);
+      };
+    };
+
+    const cleanCam = bindMenu(
+      camMenuTriggerRef.current,
+      camMenuPopoverRef.current,
+      camMenuGroupRef.current,
+      false,
+      setIsCamMenuOpen,
+      camMenuEnterOnOpenRef
+    );
+    const cleanUser = bindMenu(
+      userMenuTriggerRef.current,
+      userMenuPopoverRef.current,
+      userMenuGroupRef.current,
+      true,
+      setIsUserMenuOpen,
+      userMenuEnterOnOpenRef
+    );
+    return () => {
+      cleanCam();
+      cleanUser();
+    };
+  }, [auth.isAuthenticated, activeTab, focusedChannel.sourceType, focusedChannel.isBroadcasting]);
+
+  // Press Escape while annotating to cancel the current in-progress polygon
+  useEffect(() => {
+    if (!isAnnotatingZones) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (
+        sourceDialogRef.current?.open ||
+        evidenceDialogRef.current?.open ||
+        manageCamerasDialogRef.current?.open
+      ) {
+        return;
+      }
+      if (zoneEditor.activeDrawingPoints.length > 0) {
+        event.preventDefault();
+        zoneEditor.cancelDrawing();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isAnnotatingZones, zoneEditor]);
+
+  const camMenuSpacePressedRef = useRef(false);
+  const handleCheckboxMenuKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === ' ') {
+      camMenuSpacePressedRef.current = true;
+    }
+  };
+  const closePopoverEl = (pop: HTMLDivElement | null, delayMs: number = 0) => {
+    const hide = () => {
+      try {
+        pop?.hidePopover();
+      } catch {
+        // Ignore if already closed
+      }
+    };
+    if (delayMs > 0) {
+      setTimeout(hide, delayMs);
+    } else {
+      hide();
+    }
+  };
+  const closeCamMenu = (delayMs: number = 0) => closePopoverEl(camMenuPopoverRef.current, delayMs);
+  const closeUserMenu = (delayMs: number = 0) =>
+    closePopoverEl(userMenuPopoverRef.current, delayMs);
+
+  const closeAfterCheckboxAction = (pop: HTMLDivElement | null = camMenuPopoverRef.current) => {
+    if (camMenuSpacePressedRef.current) {
+      camMenuSpacePressedRef.current = false;
+      return; // APG: Space toggles a menuitemcheckbox and leaves the menu open
+    }
+    closePopoverEl(pop, 250);
+  };
+
+  const handlePopoverTriggerClickFallback = (pop: HTMLDivElement | null) => {
+    if (
+      typeof HTMLButtonElement !== 'undefined' &&
+      'commandForElement' in HTMLButtonElement.prototype
+    ) {
+      return;
+    }
+    if (!pop) return;
+    try {
+      pop.togglePopover();
+    } catch {
+      // Ignore if unsupported
+    }
+  };
+
+  const openSourceDialog = () => {
+    closeCamMenu(0);
+    const dialog = sourceDialogRef.current;
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+  };
+
+  const closeSourceDialog = () => {
+    const dialog = sourceDialogRef.current;
+    if (dialog && dialog.open) {
+      dialog.close();
+    }
+  };
+
+  const openManageCamerasDialog = () => {
+    setAddCameraError(null);
+    setDeleteCameraError(null);
+    setSelectedDeleteIds([]);
+    const dialog = manageCamerasDialogRef.current;
+    if (dialog && !dialog.open) {
+      dialog.showModal();
+    }
+  };
+
+  const closeManageCamerasDialog = () => {
+    const dialog = manageCamerasDialogRef.current;
+    if (dialog && dialog.open) {
+      dialog.close();
+    }
+  };
 
   // Sync in-place Zone Editor state cleanly when focused camera or active ZoneProfile changes
   const currentCamera =
@@ -304,33 +619,54 @@ export function App() {
       ctx.fill();
     });
 
-    // 5. Draw in-progress polygon points (Cyan)
+    // 5. Draw in-progress polygon points (synced with active lane color + snap ring on first vertex)
     const activePts = zoneEditor.activeDrawingPoints;
     if (activePts.length > 0) {
+      const strokeColor =
+        zoneEditor.mode === 'draw_lane'
+          ? '#eab308'
+          : zoneEditor.mode === 'draw_intersection'
+            ? '#3b82f6'
+            : zoneEditor.mode === 'draw_exit_zone'
+              ? '#f97316'
+              : '#06b6d4';
+
       ctx.beginPath();
       ctx.moveTo(activePts[0][0], activePts[0][1]);
       for (let i = 1; i < activePts.length; i++) {
         ctx.lineTo(activePts[i][0], activePts[i][1]);
       }
-      ctx.strokeStyle = '#06b6d4';
+      ctx.strokeStyle = strokeColor;
       ctx.lineWidth = 2;
       ctx.setLineDash([5, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
 
+      // Visual snap target around first point when >= 3 points so click-to-close is obvious
+      if (activePts.length >= 3) {
+        ctx.beginPath();
+        ctx.arc(activePts[0][0], activePts[0][1], 12, 0, Math.PI * 2);
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 2]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
       activePts.forEach((pt, idx) => {
         ctx.beginPath();
         ctx.arc(pt[0], pt[1], idx === 0 ? 6 : 4.5, 0, Math.PI * 2);
-        ctx.fillStyle = idx === 0 ? '#22d3ee' : '#ffffff';
+        ctx.fillStyle = idx === 0 ? strokeColor : '#ffffff';
         ctx.fill();
-        ctx.strokeStyle = '#0891b2';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1.25;
         ctx.stroke();
       });
     }
   }, [
     activeTab,
     isAnnotatingZones,
+    zoneEditor.mode,
     zoneEditor.geometry,
     zoneEditor.activeDrawingPoints,
     zoneEditor.selectedLaneIndex,
@@ -577,7 +913,7 @@ export function App() {
   }
 
   const cameraSlots =
-    camerasQuery.data && camerasQuery.data.length > 0
+    camerasQuery.data !== undefined
       ? camerasQuery.data
       : [
           { id: 'cam-01', name: 'Camera 01 (Primary)', location: 'Intersection 1', isActive: false, createdAt: '', updatedAt: '' },
@@ -600,9 +936,41 @@ export function App() {
       setNewCamId('');
       setNewCamName('');
       setNewCamLocation('');
-      setShowAddCamera(false);
     } catch (err: any) {
       setAddCameraError(err?.response?.data?.error || err.message || 'Failed to add camera.');
+    }
+  };
+
+  const toggleCameraDeleteSelection = (camId: string) => {
+    setDeleteCameraError(null);
+    setSelectedDeleteIds((prev) =>
+      prev.includes(camId) ? prev.filter((id) => id !== camId) : [...prev, camId]
+    );
+  };
+
+  const handleDeleteSelectedCameras = async () => {
+    if (selectedDeleteIds.length === 0) return;
+    setDeleteCameraError(null);
+    const idsToDelete = [...selectedDeleteIds];
+    try {
+      await deleteCamerasMutation.mutateAsync(idsToDelete);
+      for (const camId of idsToDelete) {
+        transmitters.stopBroadcast(camId);
+      }
+      if (idsToDelete.includes(focusedCameraId)) {
+        const remaining = cameraSlots.filter((c) => !idsToDelete.includes(c.id));
+        if (remaining.length > 0) {
+          stream.setSelectedCamera(remaining[0].id);
+        }
+        setIsAnnotatingZones(false);
+        setEditorSnapshotUrl(null);
+      }
+      setSelectedDeleteIds([]);
+      closeManageCamerasDialog();
+    } catch (err: any) {
+      setDeleteCameraError(
+        err?.response?.data?.error || err.message || 'Failed to delete selected camera(s).'
+      );
     }
   };
 
@@ -629,44 +997,85 @@ export function App() {
       <header className="site-header">
         <div className="header-inner">
           <div className="brand-bar">
-            <span>VDAT Surveillance Hub</span>
-            <span className={`badge ${stream.isCameraLive ? 'badge-live' : 'badge-standby'}`}>
-              {stream.isCameraLive
-                ? 'AI Engine Online'
-                : stream.isConnected
-                  ? 'AI Engine Offline'
-                  : 'Backend Disconnected'}
-            </span>
+            <button
+              type="button"
+              className="brand-home-btn"
+              onClick={() => setActiveTab('monitor')}
+              title="Return to Live Monitor"
+            >
+              VDAT Surveillance Hub
+            </button>
           </div>
 
-          <nav className="toolbar-actions" aria-label="Main navigation">
+          <nav className="toolbar-actions" aria-label="Account and workspace menu">
             <button
+              ref={userMenuTriggerRef}
+              id="user-menu-trigger"
               type="button"
-              className={`btn ${activeTab === 'monitor' ? 'btn-active' : ''}`}
-              onClick={() => setActiveTab('monitor')}
+              className="user-menu-trigger"
+              aria-haspopup="menu"
+              aria-expanded={isUserMenuOpen}
+              {...({ commandfor: 'user-action-menu', command: 'toggle-popover' } as any)}
+              onClick={() => handlePopoverTriggerClickFallback(userMenuPopoverRef.current)}
             >
-              Live Monitor
+              <span>
+                {auth.user?.fullName} ({auth.role})
+              </span>
+              <span aria-hidden="true">▾</span>
             </button>
-            <button
-              type="button"
-              className={`btn ${activeTab === 'analytics' ? 'btn-active' : ''}`}
-              onClick={() => setActiveTab('analytics')}
+            {/* Directly after trigger so browsers emit no implicit aria-details */}
+            <div
+              ref={userMenuPopoverRef}
+              id="user-action-menu"
+              {...({ popover: 'auto' } as any)}
+              className="cam-dropdown-popover popover-align-end"
             >
-              Fleet &amp; Analytics
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => audio.setSoundAlertsEnabled(!audio.soundAlertsEnabled)}
-            >
-              {audio.soundAlertsEnabled ? 'Audio Alerts: On' : 'Audio Alerts: Muted'}
-            </button>
-            <span className="badge badge-standby">
-              {auth.user?.fullName} ({auth.role})
-            </span>
-            <button type="button" className="btn btn-danger" onClick={auth.logout}>
-              Sign Out
-            </button>
+              <div
+                ref={userMenuGroupRef}
+                {...({ focusgroup: 'menu nomemory' } as any)}
+                aria-labelledby="user-menu-trigger"
+                className="cam-dropdown-menu"
+              >
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={activeTab === 'analytics'}
+                  onKeyDown={handleCheckboxMenuKeyDown}
+                  onClick={() => {
+                    setActiveTab((prev) => (prev === 'analytics' ? 'monitor' : 'analytics'));
+                    closeAfterCheckboxAction(userMenuPopoverRef.current);
+                  }}
+                >
+                  <span>Fleet &amp; Analytics</span>
+                </button>
+
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={audio.soundAlertsEnabled}
+                  onKeyDown={handleCheckboxMenuKeyDown}
+                  onClick={() => {
+                    audio.setSoundAlertsEnabled(!audio.soundAlertsEnabled);
+                    closeAfterCheckboxAction(userMenuPopoverRef.current);
+                  }}
+                >
+                  <span>Audio Alerts</span>
+                </button>
+
+                <hr />
+
+                <button
+                  type="button"
+                  className="menu-item-danger"
+                  onClick={() => {
+                    closeUserMenu(0);
+                    auth.logout();
+                  }}
+                >
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            </div>
           </nav>
         </div>
       </header>
@@ -675,251 +1084,214 @@ export function App() {
         <main className="workspace-grid">
           {/* Left Column: Primary Focused AI Stream (with In-Place Annotate Zones) + Multi-Source Wall */}
           <div className="primary-column">
-            <section className="card card-stream" aria-labelledby="stream-title">
+            <section className="card card-stream" aria-labelledby="cam-menu-trigger">
               <div className="card-header">
-                <span id="stream-title">
-                  Focused AI Stream ({focusedCameraId})
-                  {focusedChannel.isBroadcasting ? ` — ${focusedChannel.sourceLabel}` : ''}
-                </span>
-                <div className="toolbar-actions">
-                  <span className="badge" style={{ color: lightCfg.color }}>
-                    Signal: {lightCfg.label}
-                  </span>
-                  {auth.isAdmin &&
-                    (isAnnotatingZones ? (
-                      <>
+                <div style={{ minInlineSize: 0 }}>
+                  <button
+                    ref={camMenuTriggerRef}
+                    id="cam-menu-trigger"
+                    type="button"
+                    className="cam-title-trigger"
+                    aria-haspopup="menu"
+                    aria-expanded={isCamMenuOpen}
+                    {...({ commandfor: 'cam-action-menu', command: 'toggle-popover' } as any)}
+                    onClick={() => handlePopoverTriggerClickFallback(camMenuPopoverRef.current)}
+                  >
+                    <span className="cam-title-text">
+                      Focused AI Stream ({focusedCameraId})
+                      {focusedChannel.isBroadcasting ? ` — ${focusedChannel.sourceLabel}` : ''}
+                    </span>
+                    <span className="cam-title-caret" aria-hidden="true">
+                      ▾
+                    </span>
+                  </button>
+                  {/* Directly after trigger so browsers emit no implicit aria-details */}
+                  <div
+                    ref={camMenuPopoverRef}
+                    id="cam-action-menu"
+                    {...({ popover: 'auto' } as any)}
+                    className="cam-dropdown-popover"
+                  >
+                    <div
+                      ref={camMenuGroupRef}
+                      {...({ focusgroup: 'menu nomemory' } as any)}
+                      aria-labelledby="cam-menu-trigger"
+                      className="cam-dropdown-menu"
+                    >
+                      <button type="button" onClick={openSourceDialog}>
+                        <span>
+                          {focusedChannel.isBroadcasting ? 'Change Source...' : 'Choose Source...'}
+                        </span>
+                      </button>
+
+                      {auth.isAdmin && (
                         <button
                           type="button"
-                          className="btn btn-compact btn-active"
-                          disabled={updateZonesMutation.isPending}
-                          onClick={handleSaveZones}
+                          role="menuitemcheckbox"
+                          aria-checked={isAnnotatingZones}
+                          onKeyDown={handleCheckboxMenuKeyDown}
+                          onClick={() => {
+                            toggleAnnotationMode(focusedCameraId, !isAnnotatingZones);
+                            closeAfterCheckboxAction(camMenuPopoverRef.current);
+                          }}
                         >
-                          {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
+                          <span>Annotate Zones</span>
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn-compact btn-warning"
-                          onClick={() => toggleAnnotationMode(focusedCameraId, false)}
-                        >
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
+                      )}
+
                       <button
                         type="button"
-                        className="btn btn-compact"
-                        onClick={() => toggleAnnotationMode(focusedCameraId, true)}
-                      >
-                        Annotate Zones
-                      </button>
-                    ))}
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    onClick={stream.togglePause}
-                  >
-                    {stream.isPaused ? 'Resume Feed' : 'Pause Feed'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Camera Input Source Controls: Local Video File + Laptop Webcam */}
-              <div
-                className="filter-bar"
-                role="region"
-                aria-label="Focused camera input source"
-                style={{ justifyContent: 'space-between', alignItems: 'center' }}
-              >
-                <div className="toolbar-actions">
-                  <span style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-                    Source ({focusedCameraId}):
-                  </span>
-                  <input
-                    ref={focusedFileInputRef}
-                    type="file"
-                    accept="video/*"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setEditorSnapshotUrl(null);
-                        void transmitters.startVideoFileStream(focusedCameraId, file);
-                        e.target.value = '';
-                      }
-                    }}
-                  />
-
-                  <button
-                    type="button"
-                    className="btn btn-compact btn-active"
-                    onClick={() => focusedFileInputRef.current?.click()}
-                  >
-                    Select Video File...
-                  </button>
-
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${
-                      focusedChannel.sourceType === 'laptop_webcam' ? 'btn-active' : ''
-                    }`}
-                    onClick={() => {
-                      setEditorSnapshotUrl(null);
-                      void transmitters.startLaptopCameraStream(focusedCameraId);
-                    }}
-                  >
-                    Use Laptop Camera
-                  </button>
-
-                  {focusedChannel.sourceType === 'laptop_webcam' &&
-                    transmitters.webcamDevices.length > 0 && (
-                      <select
-                        aria-label="Select laptop camera device"
-                        className="btn btn-compact"
-                        value={focusedChannel.selectedDeviceId}
-                        onChange={(e) => {
-                          transmitters.setSelectedDeviceId(focusedCameraId, e.target.value);
-                          setEditorSnapshotUrl(null);
-                          void transmitters.startLaptopCameraStream(
-                            focusedCameraId,
-                            e.target.value
-                          );
+                        role="menuitemcheckbox"
+                        aria-checked={stream.isPaused}
+                        disabled={!focusedChannel.isBroadcasting && !stream.isCameraLive}
+                        onKeyDown={handleCheckboxMenuKeyDown}
+                        onClick={() => {
+                          stream.togglePause();
+                          closeAfterCheckboxAction(camMenuPopoverRef.current);
                         }}
                       >
-                        {transmitters.webcamDevices.map((dev) => (
-                          <option key={dev.deviceId} value={dev.deviceId}>
-                            {dev.label}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                </div>
+                        <span>Pause Feed</span>
+                      </button>
 
-                <div className="toolbar-actions">
-                  <label
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.35rem',
-                      fontSize: '0.74rem',
-                      color: 'var(--text-muted)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={focusedChannel.loopVideo}
-                      onChange={(e) =>
-                        transmitters.setLoopVideo(focusedCameraId, e.target.checked)
-                      }
-                    />
-                    Loop Video
-                  </label>
-                  {focusedChannel.isBroadcasting && (
-                    <>
-                      <span className="badge badge-live">
-                        Streaming ({focusedChannel.transmittedFrames} frames)
-                      </span>
+                      {focusedChannel.sourceType === 'video_file' && (
+                        <button
+                          type="button"
+                          role="menuitemcheckbox"
+                          aria-checked={focusedChannel.loopVideo}
+                          onKeyDown={handleCheckboxMenuKeyDown}
+                          onClick={() => {
+                            transmitters.setLoopVideo(focusedCameraId, !focusedChannel.loopVideo);
+                            closeAfterCheckboxAction(camMenuPopoverRef.current);
+                          }}
+                        >
+                          <span>Loop Video</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
-                        className="btn btn-compact btn-danger"
-                        onClick={() => transmitters.stopBroadcast(focusedCameraId)}
+                        className="menu-item-danger"
+                        disabled={!focusedChannel.isBroadcasting}
+                        onClick={() => {
+                          transmitters.stopBroadcast(focusedCameraId);
+                          closeCamMenu(0);
+                        }}
                       >
-                        Stop Source
+                        <span>Stop Feed</span>
                       </button>
-                    </>
-                  )}
+
+                      <hr />
+
+                      <div role="group" aria-label="Detection Engine">
+                        <div className="cam-menu-group-label" aria-hidden="true">
+                          Detect Engine
+                        </div>
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={stream.modelStatus.profile === 'trained'}
+                          disabled={
+                            !stream.isConnected ||
+                            stream.activeCameras.length === 0 ||
+                            Boolean(stream.modelStatus.switching)
+                          }
+                          onClick={() => {
+                            stream.switchAiModel('trained');
+                            closeCamMenu(250);
+                          }}
+                        >
+                          <span>VDAT Trained (best.pt)</span>
+                          {stream.modelStatus.switching &&
+                            stream.modelStatus.profile !== 'trained' && (
+                              <span className="hint" aria-hidden="true">
+                                Switching...
+                              </span>
+                            )}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={stream.modelStatus.profile === 'stock'}
+                          disabled={
+                            !stream.isConnected ||
+                            stream.activeCameras.length === 0 ||
+                            Boolean(stream.modelStatus.switching)
+                          }
+                          onClick={() => {
+                            stream.switchAiModel('stock');
+                            closeCamMenu(250);
+                          }}
+                        >
+                          <span>Stock YOLO26l (Legacy)</span>
+                          {stream.modelStatus.switching &&
+                            stream.modelStatus.profile !== 'stock' && (
+                              <span className="hint" aria-hidden="true">
+                                Switching...
+                              </span>
+                            )}
+                        </button>
+                      </div>
+
+                      <hr />
+
+                      <div role="group" aria-label="Tracking Engine">
+                        <div className="cam-menu-group-label" aria-hidden="true">
+                          Tracking Engine
+                        </div>
+                        {(
+                          [
+                            ['bytetrack', 'ByteTrack'],
+                            ['botsort', 'BoT-SORT'],
+                            ['deepsort', 'DeepSORT'],
+                          ] as const
+                        ).map(([trackerId, trackerLabel]) => (
+                          <button
+                            key={trackerId}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={stream.trackerStatus.tracker === trackerId}
+                            disabled={
+                              !stream.isConnected ||
+                              stream.activeCameras.length === 0 ||
+                              Boolean(stream.trackerStatus.switching)
+                            }
+                            onClick={() => {
+                              stream.switchAiTracker(trackerId);
+                              closeCamMenu(250);
+                            }}
+                          >
+                            <span>{trackerLabel}</span>
+                            {stream.trackerStatus.switching &&
+                              stream.trackerStatus.tracker !== trackerId && (
+                                <span className="hint" aria-hidden="true">
+                                  Switching...
+                                </span>
+                              )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
+
+                <div className="toolbar-actions" />
               </div>
 
-              {isAnnotatingZones && auth.isAdmin && (
-                <div className="filter-bar" role="group" aria-label="In-place zone annotation tools">
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${zoneEditor.mode === 'draw_lane' ? 'btn-warning' : ''}`}
-                    onClick={() => zoneEditor.setMode('draw_lane')}
-                  >
-                    Approach Lane ({zoneEditor.geometry.lanes.length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${
-                      zoneEditor.mode === 'draw_intersection' ? 'btn-active' : ''
-                    }`}
-                    onClick={() => zoneEditor.setMode('draw_intersection')}
-                  >
-                    Intersection ({zoneEditor.geometry.intersection.length} pts)
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${
-                      zoneEditor.mode === 'draw_exit_zone' ? 'btn-warning' : ''
-                    }`}
-                    onClick={() => zoneEditor.setMode('draw_exit_zone')}
-                  >
-                    Exit Zone ({zoneEditor.geometry.exitZones.length})
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${
-                      zoneEditor.mode === 'place_green_light' ? 'btn-success' : ''
-                    }`}
-                    onClick={() => zoneEditor.setMode('place_green_light')}
-                  >
-                    Green Light
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${
-                      zoneEditor.mode === 'place_red_light' ? 'btn-danger' : ''
-                    }`}
-                    onClick={() => zoneEditor.setMode('place_red_light')}
-                  >
-                    Red Light
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn btn-compact ${zoneEditor.mode === 'select' ? 'btn-active' : ''}`}
-                    onClick={() => zoneEditor.setMode('select')}
-                  >
-                    Move Vertex
-                  </button>
-                  {zoneEditor.activeDrawingPoints.length >= 3 && (
-                    <button
-                      type="button"
-                      className="btn btn-compact btn-success"
-                      onClick={() => zoneEditor.finishDrawing()}
-                    >
-                      Complete Polygon ({zoneEditor.activeDrawingPoints.length} pts)
-                    </button>
-                  )}
-                  <label className="crossing-toggle-label">
-                    <input
-                      type="checkbox"
-                      checked={zoneEditor.geometry.crossingMode}
-                      onChange={(e) => zoneEditor.setCrossingMode(e.target.checked)}
-                    />
-                    3/4-Way Crossing Mode (3s Clearance + Exit Zone)
-                  </label>
-                  <button
-                    type="button"
-                    className="btn btn-compact"
-                    onClick={() => {
-                      const snap = transmitters.getChannelSnapshot(focusedCameraId);
-                      if (snap) setEditorSnapshotUrl(snap);
-                    }}
-                  >
-                    Grab Fresh Frame
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-compact btn-active"
-                    disabled={updateZonesMutation.isPending}
-                    onClick={handleSaveZones}
-                  >
-                    {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
-                  </button>
-                </div>
-              )}
+              <input
+                ref={focusedFileInputRef}
+                type="file"
+                accept="video/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    setEditorSnapshotUrl(null);
+                    void transmitters.startVideoFileStream(focusedCameraId, file);
+                    closeSourceDialog();
+                    e.target.value = '';
+                  }
+                }}
+              />
 
               {focusedChannel.error && (
                 <div
@@ -963,9 +1335,15 @@ export function App() {
                         <div className="stream-placeholder">
                           <span>No raw video frame captured yet for {focusedCameraId}</span>
                           <span style={{ fontSize: '0.78rem', maxInlineSize: '56ch' }}>
-                            Click <strong>Select Video File...</strong> or{' '}
-                            <strong>Use Laptop Camera</strong> above to start a feed and annotate directly over the clean frame.
+                            Open the camera title menu above and choose <strong>Choose Source...</strong> to start a feed and annotate directly over the clean frame.
                           </span>
+                          <button
+                            type="button"
+                            className="btn btn-compact btn-active"
+                            onClick={openSourceDialog}
+                          >
+                            Choose Source...
+                          </button>
                         </div>
                       );
                     }
@@ -1058,237 +1436,49 @@ export function App() {
                       <>
                         <span>Waiting for AI-annotated camera stream ({focusedCameraId})</span>
                         <span style={{ fontSize: '0.78rem' }}>
-                          Select a video file or laptop camera on any slot below while the shared-YOLO AI module is connected
+                          Open the camera title menu above to choose a video file or laptop camera while the AI engine is connected
                         </span>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-active"
+                          onClick={openSourceDialog}
+                        >
+                          Choose Source...
+                        </button>
                       </>
                     )}
                   </div>
                 )}
               </div>
 
-              {isAnnotatingZones && auth.isAdmin ? (
-                <div className="inline-zone-drawer">
-                  <div
-                    className="filter-bar"
-                    style={{
-                      justifyContent: 'space-between',
-                      padding: 0,
-                      borderBlockEnd: 'none',
-                      background: 'transparent',
-                    }}
-                  >
-                    <div className="toolbar-actions">
-                      <button
-                        type="button"
-                        className="btn btn-compact btn-success"
-                        disabled={zoneEditor.activeDrawingPoints.length < 3}
-                        onClick={() => zoneEditor.finishDrawing()}
-                      >
-                        Complete Polygon ({zoneEditor.activeDrawingPoints.length} pts)
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-compact"
-                        disabled={zoneEditor.activeDrawingPoints.length === 0}
-                        onClick={() => zoneEditor.cancelDrawing()}
-                      >
-                        Reset Points
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-compact"
-                        onClick={() => zoneEditor.deleteLastInActiveMode()}
-                      >
-                        Delete Last
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-compact"
-                        disabled={!zoneEditor.canUndo}
-                        onClick={() => zoneEditor.undo()}
-                      >
-                        Undo
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-compact"
-                        disabled={!zoneEditor.canRedo}
-                        onClick={() => zoneEditor.redo()}
-                      >
-                        Redo
-                      </button>
-                    </div>
-
-                    <div className="toolbar-actions">
-                      <span className="badge badge-standby">
-                        Profile:{' '}
-                        {focusedChannel.isBroadcasting
-                          ? focusedChannel.sourceKey
-                          : currentCamera?.activeSourceKey ||
-                            currentCamera?.config?.sourceKey ||
-                            `camera:${focusedCameraId}`}
-                      </span>
-                      <button
-                        type="button"
-                        className="btn btn-compact btn-danger"
-                        onClick={() => zoneEditor.resetAllZones()}
-                      >
-                        Clear All
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-compact btn-active"
-                        disabled={updateZonesMutation.isPending}
-                        onClick={handleSaveZones}
-                      >
-                        {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync Zones'}
-                      </button>
+              <div className="hud-wrapper">
+                <div className="hud-bar">
+                  <div className="stat-box">
+                    <div className="stat-label">Active Vehicles</div>
+                    <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Total Tracked</div>
+                    <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Violation Count</div>
+                    <div className="stat-value" style={{ color: 'var(--danger)' }}>
+                      {stream.telemetry.violations_count ?? mergedViolations.length}
                     </div>
                   </div>
-
-                  <div className="inline-zone-lists">
-                    <div>
-                      <div className="zone-section-title">
-                        Approach Lanes ({zoneEditor.geometry.lanes.length})
-                      </div>
-                      <div style={{ display: 'grid', gap: '0.35rem' }}>
-                        {zoneEditor.geometry.lanes.length === 0 ? (
-                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                            <span>No approach lanes.</span>
-                          </div>
-                        ) : (
-                          zoneEditor.geometry.lanes.map((lane, idx) => (
-                            <div key={idx} className="data-row">
-                              <span>
-                                <span
-                                  className="color-dot"
-                                  style={{ background: '#eab308', marginInlineEnd: '0.4rem' }}
-                                />
-                                <strong>Approach {idx + 1}</strong> ({lane.length} pts)
-                              </span>
-                              <button
-                                type="button"
-                                className="btn btn-compact btn-danger"
-                                onClick={() => zoneEditor.deleteLane(idx)}
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="zone-section-title">Intersection &amp; Exit Zones</div>
-                      <div style={{ display: 'grid', gap: '0.35rem' }}>
-                        {zoneEditor.geometry.intersection.length >= 3 ? (
-                          <div className="data-row">
-                            <span>
-                              <span
-                                className="color-dot"
-                                style={{ background: '#3b82f6', marginInlineEnd: '0.4rem' }}
-                              />
-                              <strong>Intersection</strong> ({zoneEditor.geometry.intersection.length}{' '}
-                              pts)
-                            </span>
-                            <button
-                              type="button"
-                              className="btn btn-compact btn-danger"
-                              onClick={() => zoneEditor.clearIntersection()}
-                            >
-                              Clear
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                            <span>No intersection polygon.</span>
-                          </div>
-                        )}
-                        {zoneEditor.geometry.exitZones.map((ez, idx) => (
-                          <div key={idx} className="data-row">
-                            <span>
-                              <span
-                                className="color-dot"
-                                style={{ background: '#f97316', marginInlineEnd: '0.4rem' }}
-                              />
-                              <strong>Exit Zone {idx + 1}</strong> ({ez.length} pts)
-                            </span>
-                            <button
-                              type="button"
-                              className="btn btn-compact btn-danger"
-                              onClick={() => zoneEditor.deleteExitZone(idx)}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="zone-section-title">
-                        Traffic Lights ({zoneEditor.geometry.lightBoxes.length})
-                      </div>
-                      <div style={{ display: 'grid', gap: '0.35rem' }}>
-                        {zoneEditor.geometry.lightBoxes.length === 0 ? (
-                          <div className="data-row" style={{ color: 'var(--text-muted)' }}>
-                            <span>No light points set.</span>
-                          </div>
-                        ) : (
-                          zoneEditor.geometry.lightBoxes.map((lb, idx) => (
-                            <div key={idx} className="data-row">
-                              <span>
-                                <span
-                                  className="color-dot"
-                                  style={{
-                                    background: lb.color === 'green' ? '#22c55e' : '#ef4444',
-                                    marginInlineEnd: '0.4rem',
-                                  }}
-                                />
-                                <strong style={{ textTransform: 'uppercase' }}>
-                                  {lb.color ?? 'red'}
-                                </strong>{' '}
-                                ({lb.x}, {lb.y})
-                              </span>
-                              <button
-                                type="button"
-                                className="btn btn-compact btn-danger"
-                                onClick={() => zoneEditor.deleteLightBox(idx)}
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Stream FPS</div>
+                    <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
+                  </div>
+                  <div className="stat-box">
+                    <div className="stat-label">Signal</div>
+                    <div className="stat-value" style={{ color: lightCfg.color }}>
+                      {lightCfg.label}
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="hud-wrapper">
-                  <div className="hud-bar">
-                    <div className="stat-box">
-                      <div className="stat-label">Active Vehicles</div>
-                      <div className="stat-value">{stream.telemetry.vehicle_count ?? 0}</div>
-                    </div>
-                    <div className="stat-box">
-                      <div className="stat-label">Total Tracked</div>
-                      <div className="stat-value">{stream.telemetry.total_tracked ?? 0}</div>
-                    </div>
-                    <div className="stat-box">
-                      <div className="stat-label">Violation Count</div>
-                      <div className="stat-value" style={{ color: 'var(--danger)' }}>
-                        {stream.telemetry.violations_count ?? mergedViolations.length}
-                      </div>
-                    </div>
-                    <div className="stat-box">
-                      <div className="stat-label">Stream FPS</div>
-                      <div className="stat-value">{stream.telemetry.fps ?? 0} FPS</div>
-                    </div>
-                  </div>
-                </div>
-              )}
+              </div>
             </section>
 
             {/* Multi-Source Camera Preview Wall (Raw Previews + Background AI Processing) */}
@@ -1303,67 +1493,28 @@ export function App() {
                     <button
                       type="button"
                       className="btn btn-compact btn-active"
-                      onClick={() => setShowAddCamera((prev) => !prev)}
+                      onClick={openManageCamerasDialog}
                     >
-                      {showAddCamera ? 'Cancel' : '+ Add Camera Slot'}
+                      Add / Delete Camera
                     </button>
                   )}
                 </div>
               </div>
 
-              {showAddCamera && auth.isAdmin && (
-                <form className="add-camera-form" onSubmit={handleCreateCamera}>
-                  <label htmlFor="new-cam-id" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                    ID:
-                  </label>
-                  <input
-                    id="new-cam-id"
-                    type="text"
-                    className="add-camera-input"
-                    placeholder="cam-07"
-                    value={newCamId}
-                    onChange={(e) => setNewCamId(e.target.value)}
-                    required
-                  />
-                  <label htmlFor="new-cam-name" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                    Name:
-                  </label>
-                  <input
-                    id="new-cam-name"
-                    type="text"
-                    className="add-camera-input"
-                    placeholder="Intersection 7"
-                    value={newCamName}
-                    onChange={(e) => setNewCamName(e.target.value)}
-                    required
-                  />
-                  <label htmlFor="new-cam-loc" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                    Location:
-                  </label>
-                  <input
-                    id="new-cam-loc"
-                    type="text"
-                    className="add-camera-input"
-                    placeholder="District 1"
-                    value={newCamLocation}
-                    onChange={(e) => setNewCamLocation(e.target.value)}
-                  />
-                  <button
-                    type="submit"
-                    className="btn btn-compact btn-success"
-                    disabled={createCameraMutation.isPending}
-                  >
-                    {createCameraMutation.isPending ? 'Adding...' : 'Register Slot'}
-                  </button>
-                  {addCameraError && (
-                    <span style={{ color: 'var(--danger-text)', fontSize: '0.74rem' }}>
-                      {addCameraError}
-                    </span>
-                  )}
-                </form>
-              )}
-
               <div className="camera-wall-grid">
+                {cameraSlots.length === 0 && (
+                  <div
+                    style={{
+                      gridColumn: '1 / -1',
+                      textAlign: 'center',
+                      padding: '1.5rem',
+                      color: 'var(--text-muted)',
+                      fontSize: '0.84rem',
+                    }}
+                  >
+                    No camera slots registered. Click <strong>Add / Delete Camera</strong> to add one.
+                  </div>
+                )}
                 {cameraSlots.map((cam) => {
                   const ch = transmitters.getChannel(cam.id);
                   const camTelemetry = stream.telemetryByCamera[cam.id];
@@ -1388,7 +1539,7 @@ export function App() {
                             <span>
                               No active source on <strong>{cam.id}</strong>
                               <br />
-                              Select a video or webcam below
+                              Click Inspect Camera to configure
                             </span>
                           </div>
                         )}
@@ -1398,12 +1549,28 @@ export function App() {
                         <h3 className="camera-tile-title">
                           {cam.id} — {cam.name}
                         </h3>
-                        <span className={`badge ${isAiOnline ? 'badge-live' : 'badge-standby'}`}>
-                          {isAiOnline ? 'AI Online' : 'AI Offline'}
-                        </span>
+                        <button
+                          type="button"
+                          className={`btn btn-compact ${isFocused ? 'btn-active' : ''}`}
+                          onClick={() => {
+                            setIsAnnotatingZones(false);
+                            setEditorSnapshotUrl(null);
+                            stream.setSelectedCamera(cam.id);
+                          }}
+                        >
+                          {isFocused ? 'Inspecting' : 'Inspect Camera'}
+                        </button>
                       </header>
 
                       <div className="camera-tile-telemetry">
+                        <span
+                          style={{
+                            color: isAiOnline ? 'var(--success-text)' : 'var(--danger-text)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          {isAiOnline ? 'AI Online' : 'AI Offline'}
+                        </span>
                         <span>Vehicles: {camTelemetry?.vehicle_count ?? 0}</span>
                         <span>Tracked: {camTelemetry?.total_tracked ?? 0}</span>
                         <span>
@@ -1411,79 +1578,6 @@ export function App() {
                         </span>
                         <span style={{ color: camLightCfg.color }}>{camLightCfg.label}</span>
                       </div>
-
-                      <footer className="camera-tile-footer">
-                        <div className="camera-tile-controls">
-                          <input
-                            ref={(el) => {
-                              tileFileInputsRef.current[cam.id] = el;
-                            }}
-                            type="file"
-                            accept="video/*"
-                            style={{ display: 'none' }}
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                if (isFocused) setEditorSnapshotUrl(null);
-                                void transmitters.startVideoFileStream(cam.id, file);
-                                e.target.value = '';
-                              }
-                            }}
-                          />
-                          <button
-                            type="button"
-                            className="btn btn-compact btn-active"
-                            onClick={() => tileFileInputsRef.current[cam.id]?.click()}
-                          >
-                            {ch.sourceType === 'video_file' ? 'Change Video...' : 'Select Video...'}
-                          </button>
-                          <button
-                            type="button"
-                            className={`btn btn-compact ${
-                              ch.sourceType === 'laptop_webcam' ? 'btn-active' : ''
-                            }`}
-                            onClick={() => {
-                              if (isFocused) setEditorSnapshotUrl(null);
-                              void transmitters.startLaptopCameraStream(cam.id);
-                            }}
-                          >
-                            Webcam
-                          </button>
-                          {ch.isBroadcasting && (
-                            <button
-                              type="button"
-                              className="btn btn-compact btn-danger"
-                              onClick={() => transmitters.stopBroadcast(cam.id)}
-                            >
-                              Stop
-                            </button>
-                          )}
-                        </div>
-
-                        <div className="camera-tile-controls">
-                          <button
-                            type="button"
-                            className={`btn btn-compact ${isFocused && !isAnnotatingZones ? 'btn-active' : ''}`}
-                            onClick={() => {
-                              setIsAnnotatingZones(false);
-                              setEditorSnapshotUrl(null);
-                              stream.setSelectedCamera(cam.id);
-                            }}
-                          >
-                            {isFocused ? 'In AI Focus' : 'Inspect AI'}
-                          </button>
-
-                          {auth.isAdmin && (
-                            <button
-                              type="button"
-                              className={`btn btn-compact ${isFocused && isAnnotatingZones ? 'btn-warning' : ''}`}
-                              onClick={() => toggleAnnotationMode(cam.id, true)}
-                            >
-                              Annotate Zones
-                            </button>
-                          )}
-                        </div>
-                      </footer>
                     </article>
                   );
                 })}
@@ -1491,8 +1585,346 @@ export function App() {
             </section>
           </div>
 
-          {/* Right Column: Violation Evidence Stream & Review */}
-          <aside className="card card-sidebar" aria-labelledby="proofs-title">
+          {/* Right Column: Transforms into Dedicated Zone Annotation Panel when annotating, otherwise Violation Evidence */}
+          {isAnnotatingZones && auth.isAdmin ? (
+            <aside className="card annotate-sidebar" aria-labelledby="annotate-panel-title">
+              <div className="card-header">
+                <span id="annotate-panel-title">Zone Annotation ({focusedCameraId})</span>
+                <span className="badge badge-standby" style={{ fontSize: '0.62rem' }}>
+                  {focusedChannel.isBroadcasting
+                    ? focusedChannel.sourceKey
+                    : currentCamera?.activeSourceKey ||
+                      currentCamera?.config?.sourceKey ||
+                      `camera:${focusedCameraId}`}
+                </span>
+              </div>
+
+              {/* Separate Top Save / Exit Bar */}
+              <div className="annotate-save-bar">
+                <button
+                  type="button"
+                  className="btn btn-active"
+                  disabled={updateZonesMutation.isPending}
+                  onClick={handleSaveZones}
+                >
+                  {updateZonesMutation.isPending ? 'Saving...' : 'Save & Sync'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-warning"
+                  onClick={() => toggleAnnotationMode(focusedCameraId, false)}
+                >
+                  Exit Editor
+                </button>
+              </div>
+
+              <div className="annotate-body">
+                {/* 1. Icon Controls: Grab Frame, Undo, Redo, Cancel Current */}
+                <div className="annotate-section">
+                  <div className="annotate-icon-bar" role="group" aria-label="Canvas quick actions">
+                    <button
+                      type="button"
+                      className="annotate-icon-btn"
+                      aria-label="Grab Fresh Frame"
+                      title="Grab Fresh Frame"
+                      onClick={() => {
+                        const snap = transmitters.getChannelSnapshot(focusedCameraId);
+                        if (snap) setEditorSnapshotUrl(snap);
+                      }}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+                        <circle cx="12" cy="13" r="3" />
+                      </svg>
+                      <span>Grab</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="annotate-icon-btn"
+                      aria-label="Undo"
+                      title="Undo"
+                      disabled={!zoneEditor.canUndo}
+                      onClick={() => zoneEditor.undo()}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 7v6h6" />
+                        <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+                      </svg>
+                      <span>Undo</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="annotate-icon-btn"
+                      aria-label="Redo"
+                      title="Redo"
+                      disabled={!zoneEditor.canRedo}
+                      onClick={() => zoneEditor.redo()}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M21 7v6h-6" />
+                        <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13" />
+                      </svg>
+                      <span>Redo</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="annotate-icon-btn"
+                      aria-label="Cancel current polygon drawing (Esc)"
+                      title="Cancel current polygon drawing (Esc)"
+                      disabled={zoneEditor.activeDrawingPoints.length === 0}
+                      onClick={() => zoneEditor.cancelDrawing()}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M18 6 6 18" />
+                        <path d="m6 6 12 12" />
+                      </svg>
+                      <span>Cancel Draw</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Lanes (Color-Synced with Canvas Drawing) */}
+                <div className="annotate-section">
+                  <div className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+                    Lanes &amp; Zones
+                  </div>
+                  <div className="annotate-tool-grid" role="group" aria-label="Zone drawing tools">
+                    <button
+                      type="button"
+                      className={`btn btn-compact zone-btn-approach ${
+                        zoneEditor.mode === 'draw_lane' ? 'is-selected' : ''
+                      }`}
+                      onClick={() => zoneEditor.setMode('draw_lane')}
+                    >
+                      <span className="color-dot" style={{ background: '#eab308' }} />
+                      Approach Lane
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-compact zone-btn-intersection ${
+                        zoneEditor.mode === 'draw_intersection' ? 'is-selected' : ''
+                      }`}
+                      onClick={() => zoneEditor.setMode('draw_intersection')}
+                    >
+                      <span className="color-dot" style={{ background: '#3b82f6' }} />
+                      Intersection
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-compact zone-btn-exit ${
+                        zoneEditor.mode === 'draw_exit_zone' ? 'is-selected' : ''
+                      }`}
+                      onClick={() => zoneEditor.setMode('draw_exit_zone')}
+                    >
+                      <span className="color-dot" style={{ background: '#f97316' }} />
+                      Exit Zone
+                    </button>
+                  </div>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    Click near the first vertex to auto-complete polygon, or press <strong>Esc</strong> / <strong>Cancel Draw</strong>.
+                  </span>
+                </div>
+
+                {/* 3. Traffic Light */}
+                <div className="annotate-section">
+                  <div className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+                    Traffic Light
+                  </div>
+                  <div className="annotate-tool-grid" role="group" aria-label="Traffic light point tools">
+                    <button
+                      type="button"
+                      className={`btn btn-compact zone-btn-green ${
+                        zoneEditor.mode === 'place_green_light' ? 'is-selected' : ''
+                      }`}
+                      onClick={() => zoneEditor.setMode('place_green_light')}
+                    >
+                      <span className="color-dot" style={{ background: '#22c55e' }} />
+                      Green Light
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-compact zone-btn-red ${
+                        zoneEditor.mode === 'place_red_light' ? 'is-selected' : ''
+                      }`}
+                      onClick={() => zoneEditor.setMode('place_red_light')}
+                    >
+                      <span className="color-dot" style={{ background: '#ef4444' }} />
+                      Red Light
+                    </button>
+                  </div>
+                </div>
+
+                {/* 4. Multi-Lane Crossing Toggle */}
+                <div className="annotate-section">
+                  <label className="crossing-toggle-label" style={{ padding: '0.5rem 0.65rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={zoneEditor.geometry.crossingMode}
+                      onChange={(e) => zoneEditor.setCrossingMode(e.target.checked)}
+                    />
+                    <span>3/4-Way Multi-Lane Mode (3s Clearance + Exit Zone)</span>
+                  </label>
+                </div>
+
+                {/* 5. Current Annotated Stats & Items */}
+                <div className="annotate-section">
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <div className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+                      Current Annotated
+                    </div>
+                    {(zoneEditor.geometry.lanes.length > 0 ||
+                      zoneEditor.geometry.intersection.length > 0 ||
+                      zoneEditor.geometry.exitZones.length > 0 ||
+                      zoneEditor.geometry.lightBoxes.length > 0) && (
+                      <button
+                        type="button"
+                        className="btn btn-compact btn-danger"
+                        onClick={() => zoneEditor.resetAllZones()}
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="annotate-stats-list">
+                    {zoneEditor.geometry.lanes.map((lane, idx) => (
+                      <div key={`lane-${idx}`} className="data-row">
+                        <span>
+                          <span
+                            className="color-dot"
+                            style={{ background: '#eab308', marginInlineEnd: '0.4rem' }}
+                          />
+                          <strong>Approach {idx + 1}</strong> ({lane.length} pts)
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-danger"
+                          onClick={() => zoneEditor.deleteLane(idx)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    {zoneEditor.geometry.intersection.length >= 3 && (
+                      <div className="data-row">
+                        <span>
+                          <span
+                            className="color-dot"
+                            style={{ background: '#3b82f6', marginInlineEnd: '0.4rem' }}
+                          />
+                          <strong>Intersection</strong> ({zoneEditor.geometry.intersection.length}{' '}
+                          pts)
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-danger"
+                          onClick={() => zoneEditor.clearIntersection()}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    )}
+
+                    {zoneEditor.geometry.exitZones.map((ez, idx) => (
+                      <div key={`exit-${idx}`} className="data-row">
+                        <span>
+                          <span
+                            className="color-dot"
+                            style={{ background: '#f97316', marginInlineEnd: '0.4rem' }}
+                          />
+                          <strong>Exit Zone {idx + 1}</strong> ({ez.length} pts)
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-danger"
+                          onClick={() => zoneEditor.deleteExitZone(idx)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    {zoneEditor.geometry.lightBoxes.map((lb, idx) => (
+                      <div key={`light-${idx}`} className="data-row">
+                        <span>
+                          <span
+                            className="color-dot"
+                            style={{
+                              background: lb.color === 'green' ? '#22c55e' : '#ef4444',
+                              marginInlineEnd: '0.4rem',
+                            }}
+                          />
+                          <strong style={{ textTransform: 'uppercase' }}>
+                            {lb.color ?? 'red'} Light
+                          </strong>{' '}
+                          ({lb.x}, {lb.y})
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-compact btn-danger"
+                          onClick={() => zoneEditor.deleteLightBox(idx)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    {zoneEditor.geometry.lanes.length === 0 &&
+                      zoneEditor.geometry.intersection.length < 3 &&
+                      zoneEditor.geometry.exitZones.length === 0 &&
+                      zoneEditor.geometry.lightBoxes.length === 0 && (
+                        <div className="data-row" style={{ color: 'var(--text-muted)' }}>
+                          <span>No zones or traffic lights annotated yet.</span>
+                        </div>
+                      )}
+                  </div>
+                </div>
+              </div>
+            </aside>
+          ) : (
+            <aside className="card card-sidebar" aria-labelledby="proofs-title">
             <div className="card-header">
               <span id="proofs-title">Violation Evidence ({mergedViolations.length})</span>
               <div className="toolbar-actions">
@@ -1504,42 +1936,55 @@ export function App() {
                 >
                   Export CSV
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-compact"
-                  onClick={() => violationsQuery.refetch()}
-                >
-                  Refresh
-                </button>
               </div>
             </div>
 
-            <div className="filter-bar" role="group" aria-label="Filter violations by status and camera" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <div
+              className="filter-bar"
+              role="group"
+              aria-label="Filter violations by status and camera"
+              style={{ justifyContent: 'space-between', alignItems: 'center' }}
+            >
               <div className="toolbar-actions">
-                {(['ALL', 'PENDING_REVIEW', 'CONFIRMED', 'DISMISSED'] as const).map((st) => {
-                  const isSelected = (st === 'ALL' && !statusFilter) || st === statusFilter;
-                  return (
-                    <button
-                      key={st}
-                      type="button"
-                      className={`btn btn-compact ${isSelected ? 'btn-active' : ''}`}
-                      onClick={() => setStatusFilter(st === 'ALL' ? undefined : st)}
-                    >
-                      {st === 'ALL' ? 'All' : VIOLATION_STATUS_CONFIG[st].label}
-                    </button>
-                  );
-                })}
+                <label
+                  htmlFor="violation-status-filter"
+                  style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}
+                >
+                  Status:
+                </label>
+                <select
+                  id="violation-status-filter"
+                  className="btn btn-compact"
+                  value={statusFilter ?? 'ALL'}
+                  onChange={(e) =>
+                    setStatusFilter(
+                      e.target.value === 'ALL' ? undefined : (e.target.value as ViolationStatus)
+                    )
+                  }
+                >
+                  <option value="ALL">All</option>
+                  <option value="PENDING_REVIEW">
+                    {VIOLATION_STATUS_CONFIG.PENDING_REVIEW.label}
+                  </option>
+                  <option value="CONFIRMED">{VIOLATION_STATUS_CONFIG.CONFIRMED.label}</option>
+                  <option value="DISMISSED">{VIOLATION_STATUS_CONFIG.DISMISSED.label}</option>
+                </select>
               </div>
 
               <div className="toolbar-actions">
-                <label htmlFor="violation-camera-filter" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                <label
+                  htmlFor="violation-camera-filter"
+                  style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}
+                >
                   Camera:
                 </label>
                 <select
                   id="violation-camera-filter"
                   className="btn btn-compact"
                   value={cameraFilter ?? 'ALL'}
-                  onChange={(e) => setCameraFilter(e.target.value === 'ALL' ? undefined : e.target.value)}
+                  onChange={(e) =>
+                    setCameraFilter(e.target.value === 'ALL' ? undefined : e.target.value)
+                  }
                 >
                   <option value="ALL">All Cameras</option>
                   {cameraSlots.map((c) => (
@@ -1574,28 +2019,63 @@ export function App() {
                         onClick={() => openEvidenceViewer(v, 'video')}
                       />
                       <div className="violation-info">
+                        {/* Row 1: Vehicle + ID */}
                         <div className="violation-title">
-                          <span className="badge badge-standby" style={{ fontSize: '0.62rem' }}>
-                            {v.cameraId}
-                          </span>
-                          <span>Track #{v.trackId}</span>
                           <span style={{ textTransform: 'capitalize' }}>{v.vehicleClass}</span>
+                          <span>#{v.trackId}</span>
+                        </div>
+
+                        {/* Row 2: Camera + Reviewing State */}
+                        <div className="violation-badges-row">
+                          <span className="violation-attr-cam">{v.cameraId}</span>
+                          <span className="violation-attr-sep" aria-hidden="true">
+                            •
+                          </span>
                           <span
-                            className="badge"
-                            style={{
-                              color: statusCfg.color,
-                              background: statusCfg.bgColor,
-                              border: `1px solid ${statusCfg.borderColor}`,
-                              fontSize: '0.62rem',
-                            }}
+                            className="violation-attr-status"
+                            style={{ color: statusCfg.color }}
                           >
                             {statusCfg.label}
                           </span>
                         </div>
+
+                        {/* Row 3: Info (Confidence + relative time) */}
                         <div className="violation-meta">
-                          Frame {v.frameNumber} ({v.timestamp}) • Confidence:{' '}
-                          {formatConfidence(v.confidence)}
+                          Confidence: {formatConfidence(v.confidence)} •{' '}
+                          {formatShortRelativeTime(v.createdAt, relativeNowMs)}
                         </div>
+
+                        {/* Row 4: Confirm and Dismiss */}
+                        {v.status === 'PENDING_REVIEW' && (
+                          <div className="violation-actions">
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-danger"
+                              onClick={() =>
+                                reviewMutation.mutate({
+                                  id: v.id,
+                                  payload: { status: 'CONFIRMED' },
+                                })
+                              }
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-compact"
+                              onClick={() =>
+                                reviewMutation.mutate({
+                                  id: v.id,
+                                  payload: { status: 'DISMISSED' },
+                                })
+                              }
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Row 5: Stream Video and Snapshot */}
                         <div className="violation-actions">
                           <button
                             type="button"
@@ -1611,34 +2091,6 @@ export function App() {
                           >
                             Snapshot
                           </button>
-                          {v.status === 'PENDING_REVIEW' && (
-                            <>
-                              <button
-                                type="button"
-                                className="btn btn-compact btn-danger"
-                                onClick={() =>
-                                  reviewMutation.mutate({
-                                    id: v.id,
-                                    payload: { status: 'CONFIRMED' },
-                                  })
-                                }
-                              >
-                                Confirm
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-compact"
-                                onClick={() =>
-                                  reviewMutation.mutate({
-                                    id: v.id,
-                                    payload: { status: 'DISMISSED' },
-                                  })
-                                }
-                              >
-                                Dismiss
-                              </button>
-                            </>
-                          )}
                         </div>
                       </div>
                     </article>
@@ -1647,6 +2099,7 @@ export function App() {
               )}
             </div>
           </aside>
+          )}
         </main>
       )}
 
@@ -1738,7 +2191,9 @@ export function App() {
                   statsQuery.data?.byVehicleClass.map((item) => (
                     <div key={item.class} className="data-row">
                       <span style={{ textTransform: 'capitalize' }}>{item.class}</span>
-                      <strong>{item.count} violations</strong>
+                      <strong>
+                        {item.count} {item.count === 1 ? 'violation' : 'violations'}
+                      </strong>
                     </div>
                   ))
                 )}
@@ -1757,11 +2212,11 @@ export function App() {
         onClose={() => setActiveEvidence(null)}
       >
         <div className="dialog-header">
-          <span id="evidence-dialog-title">
+          <h1 id="evidence-dialog-title" className="dialog-title">
             {activeViolation
               ? `Violation Evidence — Track #${activeViolation.trackId} (${activeViolation.vehicleClass}) • Frame ${activeViolation.frameNumber}`
               : 'Violation Evidence'}
-          </span>
+          </h1>
           <form method="dialog">
             <button type="submit" className="btn btn-compact">
               Close
@@ -1862,6 +2317,273 @@ export function App() {
             </div>
           </div>
         )}
+      </dialog>
+
+      {/* Choose / Change Camera Source Modal Dialog (Native light-dismiss via closedby="any") */}
+      <dialog
+        ref={sourceDialogRef}
+        {...({ closedby: 'any' } as any)}
+        className="app-dialog source-dialog"
+        aria-labelledby="source-dialog-title"
+      >
+        <div className="dialog-header">
+          <h1 id="source-dialog-title" className="dialog-title">
+            {focusedChannel.isBroadcasting ? 'Change Source' : 'Choose Source'} ({focusedCameraId})
+          </h1>
+          <form method="dialog">
+            <button type="submit" className="btn btn-compact">
+              Close
+            </button>
+          </form>
+        </div>
+
+        <div className="dialog-body">
+          <div className="source-dialog-status">
+            <span>
+              {focusedChannel.isBroadcasting ? (
+                <>
+                  Active: <strong>{focusedChannel.sourceLabel}</strong> (
+                  {focusedChannel.transmittedFrames} frames)
+                </>
+              ) : (
+                <>No active source connected on {focusedCameraId}.</>
+              )}
+            </span>
+          </div>
+
+          <div className="source-dialog-options">
+            <button
+              type="button"
+              className="btn btn-active"
+              onClick={() => focusedFileInputRef.current?.click()}
+            >
+              {focusedChannel.sourceType === 'video_file'
+                ? 'Choose Different Video File (.mp4)...'
+                : 'Upload Video File (.mp4)...'}
+            </button>
+
+            <button
+              type="button"
+              className={`btn ${focusedChannel.sourceType === 'laptop_webcam' ? 'btn-active' : ''}`}
+              onClick={() => {
+                setEditorSnapshotUrl(null);
+                void transmitters.startLaptopCameraStream(focusedCameraId);
+                closeSourceDialog();
+              }}
+            >
+              Use Laptop Camera (Webcam)
+            </button>
+
+            {transmitters.webcamDevices.length > 0 && (
+              <div className="form-field">
+                <label htmlFor="source-webcam-select" className="form-label">
+                  Webcam Device
+                </label>
+                <select
+                  id="source-webcam-select"
+                  className="btn"
+                  value={focusedChannel.selectedDeviceId}
+                  onChange={(e) => {
+                    transmitters.setSelectedDeviceId(focusedCameraId, e.target.value);
+                    setEditorSnapshotUrl(null);
+                    void transmitters.startLaptopCameraStream(focusedCameraId, e.target.value);
+                    closeSourceDialog();
+                  }}
+                >
+                  {transmitters.webcamDevices.map((dev) => (
+                    <option key={dev.deviceId} value={dev.deviceId}>
+                      {dev.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+        </div>
+      </dialog>
+      {/* Add / Delete Camera Modal Dialog (Admin Only, Native light-dismiss via closedby="any") */}
+      <dialog
+        ref={manageCamerasDialogRef}
+        {...({ closedby: 'any' } as any)}
+        className="app-dialog manage-cameras-dialog"
+        aria-labelledby="manage-cameras-dialog-title"
+        onClose={() => {
+          setSelectedDeleteIds([]);
+          setAddCameraError(null);
+          setDeleteCameraError(null);
+        }}
+      >
+        <div className="dialog-header">
+          <h1 id="manage-cameras-dialog-title" className="dialog-title">
+            Add / Delete Camera
+          </h1>
+          <form method="dialog">
+            <button type="submit" className="btn btn-compact">
+              Close
+            </button>
+          </form>
+        </div>
+
+        <div className="dialog-body">
+          {/* Section 1: Add Camera */}
+          <section className="manage-cameras-section" aria-labelledby="add-camera-section-title">
+            <div id="add-camera-section-title" className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+              Add Camera Slot
+            </div>
+            <form className="manage-cameras-add-grid" onSubmit={handleCreateCamera}>
+              <div className="form-field">
+                <label htmlFor="new-cam-id" className="form-label" style={{ fontSize: '0.74rem' }}>
+                  Camera ID
+                </label>
+                <input
+                  id="new-cam-id"
+                  type="text"
+                  className="add-camera-input"
+                  placeholder={`cam-${String(cameraSlots.length + 1).padStart(2, '0')}`}
+                  value={newCamId}
+                  onChange={(e) => setNewCamId(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="new-cam-name" className="form-label" style={{ fontSize: '0.74rem' }}>
+                  Name
+                </label>
+                <input
+                  id="new-cam-name"
+                  type="text"
+                  className="add-camera-input"
+                  placeholder={`Camera ${String(cameraSlots.length + 1).padStart(2, '0')}`}
+                  value={newCamName}
+                  onChange={(e) => setNewCamName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="new-cam-loc" className="form-label" style={{ fontSize: '0.74rem' }}>
+                  Location
+                </label>
+                <input
+                  id="new-cam-loc"
+                  type="text"
+                  className="add-camera-input"
+                  placeholder="Intersection"
+                  value={newCamLocation}
+                  onChange={(e) => setNewCamLocation(e.target.value)}
+                />
+              </div>
+              <button
+                type="submit"
+                className="btn btn-compact btn-success"
+                style={{ alignSelf: 'end', minBlockSize: '33px' }}
+                disabled={createCameraMutation.isPending}
+              >
+                {createCameraMutation.isPending ? 'Adding...' : '+ Add'}
+              </button>
+            </form>
+            {addCameraError && (
+              <div style={{ color: 'var(--danger-text)', fontSize: '0.76rem' }}>
+                {addCameraError}
+              </div>
+            )}
+          </section>
+
+          <hr className="dialog-divider" />
+
+          {/* Section 2: Multi-Select Delete Cameras */}
+          <section className="manage-cameras-section" aria-labelledby="delete-cameras-section-title">
+            <div className="manage-cameras-section-head">
+              <div id="delete-cameras-section-title" className="zone-section-title" style={{ marginBlockEnd: 0 }}>
+                Select Camera(s) to Delete ({selectedDeleteIds.length} selected)
+              </div>
+              {cameraSlots.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-compact"
+                  onClick={() => {
+                    if (selectedDeleteIds.length === cameraSlots.length) {
+                      setSelectedDeleteIds([]);
+                    } else {
+                      setSelectedDeleteIds(cameraSlots.map((c) => c.id));
+                    }
+                  }}
+                >
+                  {selectedDeleteIds.length === cameraSlots.length ? 'Clear All' : 'Select All'}
+                </button>
+              )}
+            </div>
+
+            {cameraSlots.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+                No registered cameras to delete.
+              </div>
+            ) : (
+              <div className="camera-delete-list" role="group" aria-label="Registered cameras">
+                {cameraSlots.map((cam) => {
+                  const isChecked = selectedDeleteIds.includes(cam.id);
+                  const isAiOnline = stream.activeCameras.includes(cam.id);
+                  const violationsCount = cam.violationCount ?? 0;
+
+                  return (
+                    <label
+                      key={cam.id}
+                      className={`camera-delete-row ${isChecked ? 'is-selected' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleCameraDeleteSelection(cam.id)}
+                      />
+                      <div className="camera-delete-info">
+                        <div className="camera-delete-title">
+                          <strong>{cam.id}</strong> — {cam.name}
+                        </div>
+                        <div className="camera-delete-meta">
+                          <span>{cam.location}</span>
+                          <span>•</span>
+                          <span
+                            style={{
+                              color: isAiOnline ? 'var(--success-text)' : 'var(--text-muted)',
+                            }}
+                          >
+                            {isAiOnline ? 'AI Online' : 'AI Offline'}
+                          </span>
+                          <span>•</span>
+                          <span>
+                            {violationsCount} {violationsCount === 1 ? 'violation' : 'violations'}
+                          </span>
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+
+            {deleteCameraError && (
+              <div style={{ color: 'var(--danger-text)', fontSize: '0.76rem' }}>
+                {deleteCameraError}
+              </div>
+            )}
+
+            <div className="manage-cameras-footer">
+              <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                Deleting camera(s) also removes their associated violation history.
+              </span>
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={selectedDeleteIds.length === 0 || deleteCamerasMutation.isPending}
+                onClick={handleDeleteSelectedCameras}
+              >
+                {deleteCamerasMutation.isPending
+                  ? 'Deleting...'
+                  : `Delete Selected (${selectedDeleteIds.length})`}
+              </button>
+            </div>
+          </section>
+        </div>
       </dialog>
     </>
   );

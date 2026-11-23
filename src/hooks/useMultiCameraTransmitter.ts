@@ -27,6 +27,7 @@ interface CameraChannelRuntime {
   frameCounter: number;
   encodingInFlight: boolean;
   lastUploadAt: number;
+  sessionToken: number;
   previewCanvases: Set<HTMLCanvasElement>;
 }
 
@@ -93,7 +94,21 @@ export function useMultiCameraTransmitter() {
       const video = document.createElement('video');
       video.muted = true;
       video.playsInline = true;
+      video.autoplay = true;
       video.crossOrigin = 'anonymous';
+      video.setAttribute('aria-hidden', 'true');
+      // Keep the offscreen video attached to document.body so Chromium never aborts play()
+      // with "The play() request was interrupted because the media was removed from the document".
+      video.style.position = 'fixed';
+      video.style.width = '1px';
+      video.style.height = '1px';
+      video.style.opacity = '0';
+      video.style.pointerEvents = 'none';
+      video.style.top = '-9999px';
+      video.style.left = '-9999px';
+      if (typeof document !== 'undefined' && document.body) {
+        document.body.appendChild(video);
+      }
 
       const canvas = document.createElement('canvas');
       canvas.width = DEFAULT_CAMERA_WIDTH;
@@ -108,9 +123,12 @@ export function useMultiCameraTransmitter() {
         frameCounter: 0,
         encodingInFlight: false,
         lastUploadAt: 0,
+        sessionToken: 0,
         previewCanvases: new Set(),
       };
       runtimesRef.current.set(cameraId, runtime);
+    } else if (!runtime.video.isConnected && typeof document !== 'undefined' && document.body) {
+      document.body.appendChild(runtime.video);
     }
     return runtime;
   }, []);
@@ -138,10 +156,63 @@ export function useMultiCameraTransmitter() {
     void refreshWebcamDevices();
   }, [refreshWebcamDevices]);
 
+  const safePlayVideo = useCallback(async (video: HTMLVideoElement, runtime: CameraChannelRuntime, token: number) => {
+    if (!video.isConnected && typeof document !== 'undefined' && document.body) {
+      document.body.appendChild(video);
+    }
+
+    const waitReady = () =>
+      new Promise<void>((resolve, reject) => {
+        if (video.readyState >= 2) {
+          resolve();
+          return;
+        }
+        const onReady = () => {
+          cleanup();
+          resolve();
+        };
+        const onErr = () => {
+          cleanup();
+          reject(new Error('Failed to load selected media source.'));
+        };
+        const timer = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, 1500);
+        const cleanup = () => {
+          clearTimeout(timer);
+          video.removeEventListener('loadeddata', onReady);
+          video.removeEventListener('canplay', onReady);
+          video.removeEventListener('error', onErr);
+        };
+        video.addEventListener('loadeddata', onReady, { once: true });
+        video.addEventListener('canplay', onReady, { once: true });
+        video.addEventListener('error', onErr, { once: true });
+      });
+
+    await waitReady();
+    if (runtime.sessionToken !== token) return false;
+
+    try {
+      await video.play();
+      return runtime.sessionToken === token;
+    } catch (err: any) {
+      // Retry once after a short frame yield if Chrome fired a transient AbortError during source swap
+      if (err?.name === 'AbortError' && runtime.sessionToken === token) {
+        await new Promise((r) => setTimeout(r, 80));
+        if (runtime.sessionToken !== token) return false;
+        await video.play();
+        return runtime.sessionToken === token;
+      }
+      throw err;
+    }
+  }, []);
+
   const stopBroadcast = useCallback(
     (cameraId: string) => {
       const runtime = runtimesRef.current.get(cameraId);
       if (runtime) {
+        runtime.sessionToken += 1;
         if (runtime.timer) {
           clearInterval(runtime.timer);
           runtime.timer = null;
@@ -153,7 +224,6 @@ export function useMultiCameraTransmitter() {
         runtime.video.pause();
         runtime.video.srcObject = null;
         runtime.video.removeAttribute('src');
-        runtime.video.load();
 
         if (runtime.objectUrl) {
           URL.revokeObjectURL(runtime.objectUrl);
@@ -297,19 +367,24 @@ export function useMultiCameraTransmitter() {
       stopBroadcast(cameraId);
       updateChannel(cameraId, { error: null });
 
+      const runtime = getRuntime(cameraId);
+      const token = ++runtime.sessionToken;
+
       try {
-        const runtime = getRuntime(cameraId);
         const currentChannel = channelsRef.current[cameraId] ?? createInitialChannelState(cameraId);
         runtime.video.loop = currentChannel.loopVideo;
 
         const objUrl = URL.createObjectURL(file);
         runtime.objectUrl = objUrl;
+        runtime.video.srcObject = null;
         runtime.video.src = objUrl;
 
         const sourceKey = `file:${file.name}`;
         const label = file.name;
 
-        await runtime.video.play();
+        const ok = await safePlayVideo(runtime.video, runtime, token);
+        if (!ok) return;
+
         updateChannel(cameraId, {
           sourceType: 'video_file',
           sourceKey,
@@ -318,13 +393,14 @@ export function useMultiCameraTransmitter() {
         });
         startCaptureInterval(cameraId, 'video_file', sourceKey, label, baseTargetFps);
       } catch (err: any) {
+        if (runtime.sessionToken !== token) return;
         updateChannel(cameraId, {
           error: err.message || 'Failed to play selected video file.',
         });
         stopBroadcast(cameraId);
       }
     },
-    [baseTargetFps, getRuntime, startCaptureInterval, stopBroadcast, updateChannel]
+    [baseTargetFps, getRuntime, safePlayVideo, startCaptureInterval, stopBroadcast, updateChannel]
   );
 
   const startLaptopCameraStream = useCallback(
@@ -338,6 +414,9 @@ export function useMultiCameraTransmitter() {
         });
         return;
       }
+
+      const runtime = getRuntime(cameraId);
+      const token = ++runtime.sessionToken;
 
       try {
         const currentChannel = channelsRef.current[cameraId] ?? createInitialChannelState(cameraId);
@@ -353,7 +432,10 @@ export function useMultiCameraTransmitter() {
         };
 
         const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-        const runtime = getRuntime(cameraId);
+        if (runtime.sessionToken !== token) {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         runtime.mediaStream = mediaStream;
 
         const devices = await refreshWebcamDevices();
@@ -363,8 +445,10 @@ export function useMultiCameraTransmitter() {
           devices.find((d) => d.deviceId === targetDevice)?.label ||
           'Laptop Hardware Camera';
 
+        runtime.video.removeAttribute('src');
         runtime.video.srcObject = mediaStream;
-        await runtime.video.play();
+        const ok = await safePlayVideo(runtime.video, runtime, token);
+        if (!ok) return;
 
         const sourceKey = `webcam:${targetDevice || 'default'}`;
         const label = `Webcam: ${trackLabel}`;
@@ -377,6 +461,7 @@ export function useMultiCameraTransmitter() {
         });
         startCaptureInterval(cameraId, 'laptop_webcam', sourceKey, label, baseTargetFps);
       } catch (err: any) {
+        if (runtime.sessionToken !== token) return;
         updateChannel(cameraId, {
           error:
             err.message ||
@@ -385,7 +470,7 @@ export function useMultiCameraTransmitter() {
         stopBroadcast(cameraId);
       }
     },
-    [baseTargetFps, getRuntime, refreshWebcamDevices, startCaptureInterval, stopBroadcast, updateChannel]
+    [baseTargetFps, getRuntime, refreshWebcamDevices, safePlayVideo, startCaptureInterval, stopBroadcast, updateChannel]
   );
 
   const setLoopVideo = useCallback(
@@ -462,6 +547,7 @@ export function useMultiCameraTransmitter() {
   useEffect(() => {
     return () => {
       for (const runtime of runtimesRef.current.values()) {
+        runtime.sessionToken += 1;
         if (runtime.timer) clearInterval(runtime.timer);
         if (runtime.mediaStream) {
           runtime.mediaStream.getTracks().forEach((t) => t.stop());
@@ -469,6 +555,10 @@ export function useMultiCameraTransmitter() {
         if (runtime.objectUrl) {
           URL.revokeObjectURL(runtime.objectUrl);
         }
+        runtime.video.pause();
+        runtime.video.srcObject = null;
+        runtime.video.removeAttribute('src');
+        runtime.video.remove();
       }
       runtimesRef.current.clear();
     };

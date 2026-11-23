@@ -9,6 +9,8 @@ import {
   ViolationAlertMessage,
   EvidenceClipUpdateMessage,
   CameraStatusMessage,
+  AiModelStatusMessage,
+  AiTrackerStatusMessage,
   ConnectionEstablishedMessage,
 } from '../types/websocket.types';
 
@@ -33,6 +35,8 @@ export class VdatWebSocketClient {
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
   private evidenceClipListeners = new Set<MessageHandler<EvidenceClipUpdateMessage>>();
   private cameraStatusListeners = new Set<MessageHandler<CameraStatusMessage>>();
+  private aiModelStatusListeners = new Set<MessageHandler<AiModelStatusMessage>>();
+  private aiTrackerStatusListeners = new Set<MessageHandler<AiTrackerStatusMessage>>();
   private connectionListeners = new Set<MessageHandler<ConnectionEstablishedMessage>>();
   private statusListeners = new Set<StatusHandler>();
 
@@ -188,6 +192,16 @@ export class VdatWebSocketClient {
     return () => this.cameraStatusListeners.delete(handler);
   }
 
+  public onAiModelStatus(handler: MessageHandler<AiModelStatusMessage>): () => void {
+    this.aiModelStatusListeners.add(handler);
+    return () => this.aiModelStatusListeners.delete(handler);
+  }
+
+  public onAiTrackerStatus(handler: MessageHandler<AiTrackerStatusMessage>): () => void {
+    this.aiTrackerStatusListeners.add(handler);
+    return () => this.aiTrackerStatusListeners.delete(handler);
+  }
+
   public onConnectionEstablished(handler: MessageHandler<ConnectionEstablishedMessage>): () => void {
     this.connectionListeners.add(handler);
     return () => this.connectionListeners.delete(handler);
@@ -253,6 +267,12 @@ export class VdatWebSocketClient {
         break;
       case 'camera_status':
         for (const listener of this.cameraStatusListeners) listener(msg);
+        break;
+      case 'ai_model_status':
+        for (const listener of this.aiModelStatusListeners) listener(msg);
+        break;
+      case 'ai_tracker_status':
+        for (const listener of this.aiTrackerStatusListeners) listener(msg);
         break;
       case 'connection_established':
         for (const listener of this.connectionListeners) listener(msg);

@@ -7,6 +7,12 @@ import {
   LiveFrameMessage,
   CameraTelemetryMessage,
   CameraStatusMessage,
+  AiModelProfile,
+  AiModelStatus,
+  AiModelStatusMessage,
+  AiTrackerType,
+  AiTrackerStatus,
+  AiTrackerStatusMessage,
   ConnectionEstablishedMessage,
 } from '../types/websocket.types';
 
@@ -43,6 +49,8 @@ function revokeBlobUrlSoon(url?: string | null): void {
 interface StreamStoreState {
   selectedCameraId: string;
   activeCameras: string[];
+  modelStatus: AiModelStatus;
+  trackerStatus: AiTrackerStatus;
   connectionStatus: StreamConnectionStatus;
   latestFrameImage: string | null;
   latestFrameByCamera: Record<string, string>;
@@ -54,6 +62,8 @@ interface StreamStoreState {
 
   // Actions
   setSelectedCamera: (cameraId: string) => void;
+  switchAiModel: (profile: AiModelProfile) => void;
+  switchAiTracker: (tracker: AiTrackerType) => void;
   setConnectionStatus: (status: StreamConnectionStatus) => void;
   togglePause: () => void;
   setPaused: (paused: boolean) => void;
@@ -63,6 +73,8 @@ interface StreamStoreState {
   handleLiveFrame: (msg: LiveFrameMessage) => void;
   handleCameraTelemetry: (msg: CameraTelemetryMessage) => void;
   handleCameraStatus: (msg: CameraStatusMessage) => void;
+  handleAiModelStatus: (msg: AiModelStatusMessage) => void;
+  handleAiTrackerStatus: (msg: AiTrackerStatusMessage) => void;
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => void;
   resetStream: () => void;
 }
@@ -70,6 +82,16 @@ interface StreamStoreState {
 export const useStreamStore = create<StreamStoreState>((set, get) => ({
   selectedCameraId: env.defaultCameraId,
   activeCameras: [],
+  modelStatus: {
+    profile: 'trained',
+    modelName: 'best.pt',
+    confidence: 0.45,
+    switching: false,
+  },
+  trackerStatus: {
+    tracker: 'bytetrack',
+    switching: false,
+  },
   connectionStatus: 'disconnected',
   latestFrameImage: null,
   latestFrameByCamera: {},
@@ -87,6 +109,32 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       latestFrameImage: latestFrameByCamera[cameraId] ?? null,
       telemetry: telemetryByCamera[cameraId] ?? { ...DEFAULT_TELEMETRY },
     });
+  },
+
+  switchAiModel: (profile: AiModelProfile) => {
+    const curr = get().modelStatus;
+    if (curr.switching || curr.profile === profile) return;
+    if (vdatWsClient.sendPayload({ type: 'switch_ai_model', profile })) {
+      set({
+        modelStatus: {
+          ...curr,
+          switching: true,
+        },
+      });
+    }
+  },
+
+  switchAiTracker: (tracker: AiTrackerType) => {
+    const curr = get().trackerStatus;
+    if (curr.switching || curr.tracker === tracker) return;
+    if (vdatWsClient.sendPayload({ type: 'switch_ai_tracker', tracker })) {
+      set({
+        trackerStatus: {
+          ...curr,
+          switching: true,
+        },
+      });
+    }
   },
 
   setConnectionStatus: (status: StreamConnectionStatus) => {
@@ -186,12 +234,51 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     });
   },
 
+  handleAiModelStatus: (msg: AiModelStatusMessage) => {
+    set({
+      modelStatus: {
+        profile: msg.profile === 'stock' ? 'stock' : 'trained',
+        modelName: msg.modelName || (msg.profile === 'stock' ? 'yolo26l.pt' : 'best.pt'),
+        confidence: msg.confidence,
+        switching: Boolean(msg.switching),
+      },
+    });
+  },
+
+  handleAiTrackerStatus: (msg: AiTrackerStatusMessage) => {
+    const tracker: AiTrackerType =
+      msg.tracker === 'botsort' || msg.tracker === 'deepsort' ? msg.tracker : 'bytetrack';
+    set({
+      trackerStatus: {
+        tracker,
+        switching: Boolean(msg.switching),
+      },
+    });
+  },
+
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => {
     const selectedCameraId = get().selectedCameraId;
     vdatWsClient.sendPayload({ type: 'watch_camera', cameraId: selectedCameraId });
-    set({
+    set((state) => ({
       activeCameras: msg.activeCameras || [],
-    });
+      modelStatus: msg.modelStatus
+        ? {
+            profile: msg.modelStatus.profile === 'stock' ? 'stock' : 'trained',
+            modelName: msg.modelStatus.modelName,
+            confidence: msg.modelStatus.confidence,
+            switching: Boolean(msg.modelStatus.switching),
+          }
+        : state.modelStatus,
+      trackerStatus: msg.trackerStatus
+        ? {
+            tracker:
+              msg.trackerStatus.tracker === 'botsort' || msg.trackerStatus.tracker === 'deepsort'
+                ? msg.trackerStatus.tracker
+                : 'bytetrack',
+            switching: Boolean(msg.trackerStatus.switching),
+          }
+        : state.trackerStatus,
+    }));
   },
 
   resetStream: () => {

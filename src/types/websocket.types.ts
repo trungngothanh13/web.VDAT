@@ -14,9 +14,36 @@ export interface FrameTelemetry {
   [key: string]: unknown;
 }
 
+export type AiModelProfile = 'trained' | 'stock';
+export type AiTrackerType = 'bytetrack' | 'botsort' | 'deepsort';
+
+export interface AiModelStatus {
+  profile: AiModelProfile;
+  modelName: string;
+  confidence?: number;
+  switching?: boolean;
+}
+
+export interface AiTrackerStatus {
+  tracker: AiTrackerType;
+  switching?: boolean;
+}
+
 export interface ConnectionEstablishedMessage {
   type: 'connection_established';
   activeCameras: string[];
+  modelStatus?: AiModelStatus;
+  trackerStatus?: AiTrackerStatus;
+  timestamp: number;
+}
+
+export interface AiModelStatusMessage extends AiModelStatus {
+  type: 'ai_model_status';
+  timestamp: number;
+}
+
+export interface AiTrackerStatusMessage extends AiTrackerStatus {
+  type: 'ai_tracker_status';
   timestamp: number;
 }
 
@@ -72,6 +99,8 @@ export interface PongMessage {
 export type InboundWSMessage =
   | ConnectionEstablishedMessage
   | CameraStatusMessage
+  | AiModelStatusMessage
+  | AiTrackerStatusMessage
   | LiveFrameMessage
   | CameraTelemetryMessage
   | CameraProfileSwitchedMessage

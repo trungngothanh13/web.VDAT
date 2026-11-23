@@ -40,6 +40,17 @@ export const cameraApi = {
   },
 
   /**
+   * Delete one or more camera slots (Admin only)
+   */
+  async deleteCameras(ids: string[]): Promise<{ deleted: string[]; count: number }> {
+    const { data } = await apiClient.post<{ deleted: string[]; count: number }>(
+      '/api/cameras/delete',
+      { ids }
+    );
+    return data;
+  },
+
+  /**
    * Update lane and intersection polygon zones (Admin only)
    * Automatically pushes update to AI engine on ThunderCompute
    */
