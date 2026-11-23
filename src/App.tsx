@@ -28,6 +28,18 @@ import { Violation, ViolationStatus } from './types/violation.types';
 import { TrafficLightSamplingBox } from './types/camera.types';
 import './styles/dashboard.css';
 
+const EXPIRED_THUMB_SVG =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 68">' +
+      '<rect width="108" height="68" fill="#0f172a"/>' +
+      '<rect x="3" y="3" width="102" height="62" rx="4" fill="none" stroke="#334155" stroke-dasharray="4 3" stroke-width="1"/>' +
+      '<circle cx="54" cy="24" r="9" fill="none" stroke="#f59e0b" stroke-width="1.6"/>' +
+      '<path d="M54 19v5l3 2" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-linecap="round"/>' +
+      '<text x="54" y="49" fill="#fcd34d" font-family="Inter,sans-serif" font-size="9.5" font-weight="700" letter-spacing="0.8" text-anchor="middle">EXPIRED</text>' +
+      '</svg>'
+  );
+
 function bindDialogLightDismissFallback(dialog: HTMLDialogElement | null) {
   if (!dialog || typeof HTMLDialogElement === 'undefined') return () => {};
   if ('closedBy' in HTMLDialogElement.prototype) return () => {};
@@ -71,6 +83,8 @@ export function App() {
     violation: Violation;
     mediaTab: 'video' | 'snapshot';
   } | null>(null);
+  const [videoMediaExpired, setVideoMediaExpired] = useState(false);
+  const [snapshotMediaExpired, setSnapshotMediaExpired] = useState(false);
 
   // Multi-camera Add / Delete dialog state (Admin)
   const [newCamId, setNewCamId] = useState('');
@@ -786,6 +800,8 @@ export function App() {
 
   const openEvidenceViewer = (violation: Violation, preferredTab?: 'video' | 'snapshot') => {
     const hasClip = Boolean(violation.evidenceClipUrl);
+    setVideoMediaExpired(false);
+    setSnapshotMediaExpired(false);
     setActiveEvidence({
       violation,
       mediaTab: preferredTab ?? (hasClip ? 'video' : 'snapshot'),
@@ -805,7 +821,9 @@ export function App() {
     if (nextOpen) {
       const snap =
         transmitters.getChannelSnapshot(camId) ||
-        (hasLiveCanvasFrame ? liveStreamCanvasRef.current?.toDataURL('image/jpeg', 0.88) ?? null : null);
+        (hasLiveCanvasFrame ? liveStreamCanvasRef.current?.toDataURL('image/jpeg', 0.88) ?? null : null) ||
+        stream.cameraPreviews[camId] ||
+        null;
       setEditorSnapshotUrl(snap);
     } else {
       setEditorSnapshotUrl(null);
@@ -1641,6 +1659,7 @@ export function App() {
                   const isAiOnline = stream.activeCameras.includes(cam.id);
                   const isFocused = focusedCameraId === cam.id;
                   const camLightCfg = getLightConfig(camTelemetry?.light_state);
+                  const previewSrc = stream.cameraPreviews[cam.id];
 
                   return (
                     <article
@@ -1648,18 +1667,26 @@ export function App() {
                       className={`camera-tile ${isFocused ? 'camera-tile-focused' : ''}`}
                     >
                       <div className="camera-tile-media">
-                        <canvas
-                          ref={transmitters.getPreviewCanvasRef(cam.id)}
-                          width={427}
-                          height={240}
-                          className="camera-tile-canvas"
-                        />
-                        {!ch.isBroadcasting && (
+                        {previewSrc ? (
+                          <img
+                            src={previewSrc}
+                            alt={`${cam.id} snapshot preview`}
+                            className="camera-tile-canvas"
+                          />
+                        ) : (
                           <div className="camera-tile-placeholder">
                             <span>
-                              No active source on <strong>{cam.id}</strong>
-                              <br />
-                              Click Inspect Camera to configure
+                              {ch.uploadProgress !== null ? (
+                                <>
+                                  Uploading <strong>{ch.sourceLabel}</strong> ({ch.uploadProgress}%)…
+                                </>
+                              ) : (
+                                <>
+                                  No active source on <strong>{cam.id}</strong>
+                                  <br />
+                                  Click Inspect Camera to configure
+                                </>
+                              )}
                             </span>
                           </div>
                         )}
@@ -2130,12 +2157,14 @@ export function App() {
                     <article key={v.id} className="violation-card">
                       <img
                         className="violation-thumb"
-                        src={
-                          snapshotUrl ||
-                          'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="108" height="68"><rect fill="%231e293b" width="108" height="68"/><text fill="%2364748b" x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="10">No Image</text></svg>'
-                        }
+                        src={snapshotUrl || EXPIRED_THUMB_SVG}
                         alt={`Violation #${v.trackId}`}
-                        title="Click to stream video evidence"
+                        title="Click to inspect violation evidence"
+                        onError={(e) => {
+                          if (e.currentTarget.dataset.expired === '1') return;
+                          e.currentTarget.dataset.expired = '1';
+                          e.currentTarget.src = EXPIRED_THUMB_SVG;
+                        }}
                         onClick={() => openEvidenceViewer(v, 'video')}
                       />
                       <div className="violation-info">
@@ -2404,12 +2433,12 @@ export function App() {
                     </button>
                   </>
                 )}
-                {activeDownloadUrl && (
+                {activeDownloadUrl && !videoMediaExpired && (
                   <a href={activeDownloadUrl} download className="btn btn-compact">
                     Download MP4
                   </a>
                 )}
-                {activeSnapshotUrl && (
+                {activeSnapshotUrl && !snapshotMediaExpired && (
                   <a href={activeSnapshotUrl} download className="btn btn-compact">
                     Download JPG
                   </a>
@@ -2419,19 +2448,61 @@ export function App() {
 
             <div className="evidence-player-frame">
               {activeEvidence.mediaTab === 'video' ? (
-                <video
-                  key={activeStreamUrl}
-                  src={activeStreamUrl}
-                  poster={activeSnapshotUrl || undefined}
-                  controls
-                  autoPlay
-                  playsInline
-                  preload="metadata"
-                />
+                !activeStreamUrl || videoMediaExpired ? (
+                  <div className="evidence-expired-state">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M12 7v5l3 2" />
+                    </svg>
+                    <strong>Evidence Clip Expired</strong>
+                    <span>
+                      This temporary violation video clip has expired or is no longer available on the server.
+                    </span>
+                  </div>
+                ) : (
+                  <video
+                    key={activeStreamUrl}
+                    src={activeStreamUrl}
+                    poster={!snapshotMediaExpired && activeSnapshotUrl ? activeSnapshotUrl : undefined}
+                    controls
+                    autoPlay
+                    playsInline
+                    preload="metadata"
+                    onError={() => setVideoMediaExpired(true)}
+                  />
+                )
+              ) : !activeSnapshotUrl || snapshotMediaExpired ? (
+                <div className="evidence-expired-state">
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 7v5l3 2" />
+                  </svg>
+                  <strong>Evidence Snapshot Expired</strong>
+                  <span>
+                    This temporary snapshot image has expired or was purged from storage.
+                  </span>
+                </div>
               ) : (
                 <img
                   src={activeSnapshotUrl}
                   alt={`Snapshot for Violation #${activeViolation.trackId}`}
+                  onError={() => setSnapshotMediaExpired(true)}
                 />
               )}
             </div>

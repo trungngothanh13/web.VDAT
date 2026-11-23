@@ -704,6 +704,32 @@
     object-fit: contain;
   }
 
+  .evidence-expired-state {
+    display: grid;
+    place-items: center;
+    gap: 0.5rem;
+    padding: var(--space-xl);
+    text-align: center;
+    color: var(--text-muted);
+  }
+
+  .evidence-expired-state svg {
+    inline-size: 40px;
+    block-size: 40px;
+    color: var(--warning-text);
+  }
+
+  .evidence-expired-state strong {
+    font-size: 1rem;
+    color: var(--warning-text);
+    letter-spacing: 0.02em;
+  }
+
+  .evidence-expired-state span {
+    font-size: 0.82rem;
+    max-inline-size: 44ch;
+  }
+
   /* Accessible Sign-In Form Styles */
   .form-grid {
     display: grid;

@@ -32,6 +32,7 @@ export interface AiTrackerStatus {
 export interface ConnectionEstablishedMessage {
   type: 'connection_established';
   activeCameras: string[];
+  cameraPreviews?: Record<string, string>;
   modelStatus?: AiModelStatus;
   trackerStatus?: AiTrackerStatus;
   timestamp: number;
@@ -69,6 +70,13 @@ export interface CameraSourceStatusMessage {
   sourceType?: string;
   label?: string;
   error?: string;
+  timestamp: number;
+}
+
+export interface CameraPreviewMessage {
+  type: 'camera_preview';
+  cameraId: string;
+  image: string; // Base64 JPEG thumbnail (427x240)
   timestamp: number;
 }
 
@@ -112,6 +120,7 @@ export type InboundWSMessage =
   | AiModelStatusMessage
   | AiTrackerStatusMessage
   | LiveFrameMessage
+  | CameraPreviewMessage
   | CameraSourceStatusMessage
   | CameraTelemetryMessage
   | CameraProfileSwitchedMessage

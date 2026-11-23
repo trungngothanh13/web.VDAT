@@ -5,6 +5,7 @@ import {
   FrameTelemetry,
   StreamConnectionStatus,
   LiveFrameMessage,
+  CameraPreviewMessage,
   CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraStatusMessage,
@@ -55,6 +56,7 @@ interface StreamStoreState {
   connectionStatus: StreamConnectionStatus;
   latestFrameImage: string | null;
   latestFrameByCamera: Record<string, string>;
+  cameraPreviews: Record<string, string>;
   telemetry: FrameTelemetry;
   telemetryByCamera: Record<string, FrameTelemetry>;
   streamFps: number;
@@ -72,6 +74,7 @@ interface StreamStoreState {
 
   // WebSocket message handlers
   handleLiveFrame: (msg: LiveFrameMessage) => void;
+  handleCameraPreview: (msg: CameraPreviewMessage) => void;
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => void;
   handleCameraTelemetry: (msg: CameraTelemetryMessage) => void;
   handleCameraStatus: (msg: CameraStatusMessage) => void;
@@ -97,6 +100,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   connectionStatus: 'disconnected',
   latestFrameImage: null,
   latestFrameByCamera: {},
+  cameraPreviews: {},
   telemetry: { ...DEFAULT_TELEMETRY },
   telemetryByCamera: {},
   streamFps: 0,
@@ -177,15 +181,26 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     }
   },
 
+  handleCameraPreview: (msg: CameraPreviewMessage) => {
+    if (!msg.image) return;
+    const src = normalizeFrameSrc(msg.image);
+    set((state) => ({
+      cameraPreviews: { ...state.cameraPreviews, [msg.cameraId]: src },
+    }));
+  },
+
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => {
     if (msg.status !== 'stopped' && msg.status !== 'ended') return;
     set((state) => {
       const updatedFrames = { ...state.latestFrameByCamera };
       revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
       delete updatedFrames[msg.cameraId];
+      const updatedPreviews = { ...state.cameraPreviews };
+      delete updatedPreviews[msg.cameraId];
       const isFocused = msg.cameraId === state.selectedCameraId;
       return {
         latestFrameByCamera: updatedFrames,
+        cameraPreviews: updatedPreviews,
         ...(isFocused
           ? {
               latestFrameImage: null,
@@ -240,10 +255,13 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
         const updatedFrames = { ...state.latestFrameByCamera };
         revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
         delete updatedFrames[msg.cameraId];
+        const updatedPreviews = { ...state.cameraPreviews };
+        delete updatedPreviews[msg.cameraId];
         const isCurrentCam = msg.cameraId === state.selectedCameraId;
         return {
           activeCameras: Array.from(activeSet),
           latestFrameByCamera: updatedFrames,
+          cameraPreviews: updatedPreviews,
           ...(isCurrentCam
             ? {
                 latestFrameImage: null,
@@ -280,8 +298,15 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => {
     const selectedCameraId = get().selectedCameraId;
     vdatWsClient.sendPayload({ type: 'watch_camera', cameraId: selectedCameraId });
+    const initialPreviews: Record<string, string> = {};
+    if (msg.cameraPreviews) {
+      for (const [camId, img] of Object.entries(msg.cameraPreviews)) {
+        if (img) initialPreviews[camId] = normalizeFrameSrc(img);
+      }
+    }
     set((state) => ({
       activeCameras: msg.activeCameras || [],
+      cameraPreviews: { ...state.cameraPreviews, ...initialPreviews },
       modelStatus: msg.modelStatus
         ? {
             profile: msg.modelStatus.profile === 'stock' ? 'stock' : 'trained',

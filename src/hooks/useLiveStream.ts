@@ -35,9 +35,13 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.setConnectionStatus(status);
     });
 
-    // Subscribe to incoming live frames and AI-hosted source status updates
+    // Subscribe to incoming live frames, periodic minicam previews, and AI-hosted source status updates
     const unsubFrame = vdatWsClient.onLiveFrame((msg) => {
       store.handleLiveFrame(msg);
+    });
+
+    const unsubPreview = vdatWsClient.onCameraPreview((msg) => {
+      store.handleCameraPreview(msg);
     });
 
     const unsubSourceStatus = vdatWsClient.onCameraSourceStatus((msg) => {
@@ -77,6 +81,7 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     unsubscribeRefs.current = [
       unsubStatus,
       unsubFrame,
+      unsubPreview,
       unsubSourceStatus,
       unsubTelemetry,
       unsubCamStatus,
@@ -86,7 +91,13 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       unsubProfile,
     ];
 
+    // Periodically ask AI engine for fresh lightweight minicam thumbnails once every 60s
+    const previewTimer = setInterval(() => {
+      vdatWsClient.sendPayload({ type: 'request_camera_previews' });
+    }, 60000);
+
     return () => {
+      clearInterval(previewTimer);
       for (const unsub of unsubscribeRefs.current) {
         unsub();
       }
@@ -106,6 +117,7 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     isCameraLive,
     latestFrameImage: store.latestFrameImage,
     latestFrameByCamera: store.latestFrameByCamera,
+    cameraPreviews: store.cameraPreviews,
     telemetry: store.telemetry,
     telemetryByCamera: store.telemetryByCamera,
     streamFps: store.streamFps,
