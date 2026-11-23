@@ -102,8 +102,26 @@ export function App() {
   // In-Place Zone Annotation State
   const [isAnnotatingZones, setIsAnnotatingZones] = useState(false);
   const [editorSnapshotUrl, setEditorSnapshotUrl] = useState<string | null>(null);
+  const editorSnapshotBlobUrlRef = useRef<string | null>(null);
   const [zoneSyncBanner, setZoneSyncBanner] = useState<string | null>(null);
   const [isDraggingVertex, setIsDraggingVertex] = useState(false);
+
+  const revokeEditorSnapshotBlobUrl = () => {
+    if (editorSnapshotBlobUrlRef.current) {
+      try {
+        URL.revokeObjectURL(editorSnapshotBlobUrlRef.current);
+      } catch {
+        // Ignore already-revoked URLs
+      }
+      editorSnapshotBlobUrlRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      revokeEditorSnapshotBlobUrl();
+    };
+  }, []);
 
   // Protected hooks only connect/fetch when authenticated
   const stream = useLiveStream({ autoConnect: auth.isAuthenticated });
@@ -493,18 +511,34 @@ export function App() {
     });
   }, [currentCamera, isAnnotatingZones, zoneEditor]);
 
-  // Capture a clean raw frame automatically as soon as the video source starts while annotating
+  // Capture a clean frame automatically when annotating (webcam <video> or AI-hosted binary stream)
   useEffect(() => {
-    if (isAnnotatingZones && !editorSnapshotUrl && focusedChannel.transmittedFrames >= 1) {
-      const snap = transmitters.getChannelSnapshot(focusedCameraId);
+    if (!isAnnotatingZones) return;
+
+    if (!editorSnapshotUrl) {
+      const snap = captureAnnotationFrame(focusedCameraId);
       if (snap) setEditorSnapshotUrl(snap);
     }
+
+    // Stay subscribed while annotating so incoming binary frames don't trigger 20 Hz Zustand re-renders
+    const unsubRaw = vdatWsClient.onRawLiveFrame((pkt) => {
+      if (pkt.cameraId !== focusedCameraId) return;
+      setEditorSnapshotUrl((curr) => {
+        if (curr) return curr;
+        revokeEditorSnapshotBlobUrl();
+        const url = URL.createObjectURL(pkt.blob);
+        editorSnapshotBlobUrlRef.current = url;
+        return url;
+      });
+    });
+
+    return unsubRaw;
   }, [
     isAnnotatingZones,
     editorSnapshotUrl,
     focusedChannel.transmittedFrames,
     focusedCameraId,
-    transmitters,
+    stream.cameraPreviews[focusedCameraId],
   ]);
 
   // Draw Zone Editor overlays onto <canvas>
@@ -809,6 +843,29 @@ export function App() {
     evidenceDialogRef.current?.showModal();
   };
 
+  const captureAnnotationFrame = (camId: string): string | null => {
+    const localSnap = transmitters.getChannelSnapshot(camId);
+    if (localSnap) return localSnap;
+
+    const latestBlob = vdatWsClient.getLatestFrameBlob(camId);
+    if (latestBlob) {
+      revokeEditorSnapshotBlobUrl();
+      const url = URL.createObjectURL(latestBlob);
+      editorSnapshotBlobUrlRef.current = url;
+      return url;
+    }
+
+    if (hasLiveCanvasFrame && liveStreamCanvasRef.current && camId === focusedCameraId) {
+      try {
+        return liveStreamCanvasRef.current.toDataURL('image/jpeg', 0.88);
+      } catch {
+        // Ignore tainted canvas errors
+      }
+    }
+
+    return stream.cameraPreviews[camId] || stream.latestFrameByCamera[camId] || null;
+  };
+
   const toggleAnnotationMode = (targetCameraId?: string, forceOpen?: boolean) => {
     const camId = targetCameraId || focusedCameraId;
     if (camId !== focusedCameraId) {
@@ -819,14 +876,10 @@ export function App() {
     const nextOpen = forceOpen !== undefined ? forceOpen : !isAnnotatingZones;
     setZoneSyncBanner(null);
     if (nextOpen) {
-      const snap =
-        transmitters.getChannelSnapshot(camId) ||
-        (hasLiveCanvasFrame ? liveStreamCanvasRef.current?.toDataURL('image/jpeg', 0.88) ?? null : null) ||
-        stream.cameraPreviews[camId] ||
-        null;
-      setEditorSnapshotUrl(snap);
+      setEditorSnapshotUrl(captureAnnotationFrame(camId));
     } else {
       setEditorSnapshotUrl(null);
+      revokeEditorSnapshotBlobUrl();
       zoneEditor.cancelDrawing();
     }
     setIsAnnotatingZones(nextOpen);
@@ -1799,7 +1852,7 @@ export function App() {
                       aria-label="Grab Fresh Frame"
                       title="Grab Fresh Frame"
                       onClick={() => {
-                        const snap = transmitters.getChannelSnapshot(focusedCameraId);
+                        const snap = captureAnnotationFrame(focusedCameraId);
                         if (snap) setEditorSnapshotUrl(snap);
                       }}
                     >

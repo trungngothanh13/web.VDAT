@@ -48,6 +48,7 @@ export class VdatWebSocketClient {
   private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
   private lastFocusedTelemetryAt = new Map<string, number>();
   private lastFocusedTelemetryMeta = new Map<string, { violations?: number; light?: string }>();
+  private latestFrameBlobByCamera = new Map<string, Blob>();
   private cameraProfileListeners = new Set<MessageHandler<CameraProfileSwitchedMessage>>();
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
   private evidenceClipListeners = new Set<MessageHandler<EvidenceClipUpdateMessage>>();
@@ -160,6 +161,10 @@ export class VdatWebSocketClient {
 
   public getBufferedAmount(): number {
     return this.ws ? this.ws.bufferedAmount : 0;
+  }
+
+  public getLatestFrameBlob(cameraId: string): Blob | null {
+    return this.latestFrameBlobByCamera.get(cameraId) ?? null;
   }
 
   public sendPayload(payload: Record<string, unknown>): boolean {
@@ -279,6 +284,7 @@ export class VdatWebSocketClient {
       const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
       const ts = header.timestamp || Date.now();
       const cameraId = String(header.cameraId || 'cam-01');
+      this.latestFrameBlobByCamera.set(cameraId, blob);
 
       if (this.rawLiveFrameListeners.size > 0) {
         const pkt: RawLiveFramePacket = {
@@ -339,6 +345,9 @@ export class VdatWebSocketClient {
         for (const listener of this.cameraBypassZonesListeners) listener(msg);
         break;
       case 'camera_source_status':
+        if (msg.status === 'stopped' || msg.status === 'ended') {
+          this.latestFrameBlobByCamera.delete(msg.cameraId);
+        }
         for (const listener of this.cameraSourceStatusListeners) listener(msg);
         break;
       case 'camera_telemetry':
@@ -354,6 +363,9 @@ export class VdatWebSocketClient {
         for (const listener of this.evidenceClipListeners) listener(msg);
         break;
       case 'camera_status':
+        if (msg.status === 'OFFLINE') {
+          this.latestFrameBlobByCamera.delete(msg.cameraId);
+        }
         for (const listener of this.cameraStatusListeners) listener(msg);
         break;
       case 'ai_model_status':
