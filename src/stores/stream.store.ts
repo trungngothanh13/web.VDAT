@@ -6,6 +6,7 @@ import {
   StreamConnectionStatus,
   LiveFrameMessage,
   CameraPreviewMessage,
+  CameraBypassZonesStatusMessage,
   CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraStatusMessage,
@@ -57,6 +58,7 @@ interface StreamStoreState {
   latestFrameImage: string | null;
   latestFrameByCamera: Record<string, string>;
   cameraPreviews: Record<string, string>;
+  bypassZonesByCamera: Record<string, boolean>;
   telemetry: FrameTelemetry;
   telemetryByCamera: Record<string, FrameTelemetry>;
   streamFps: number;
@@ -67,6 +69,7 @@ interface StreamStoreState {
   setSelectedCamera: (cameraId: string) => void;
   switchAiModel: (profile: AiModelProfile) => void;
   switchAiTracker: (tracker: AiTrackerType) => void;
+  setCameraBypassZones: (cameraId: string, bypass: boolean) => void;
   setConnectionStatus: (status: StreamConnectionStatus) => void;
   togglePause: () => void;
   setPaused: (paused: boolean) => void;
@@ -75,6 +78,7 @@ interface StreamStoreState {
   // WebSocket message handlers
   handleLiveFrame: (msg: LiveFrameMessage) => void;
   handleCameraPreview: (msg: CameraPreviewMessage) => void;
+  handleCameraBypassZonesStatus: (msg: CameraBypassZonesStatusMessage) => void;
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => void;
   handleCameraTelemetry: (msg: CameraTelemetryMessage) => void;
   handleCameraStatus: (msg: CameraStatusMessage) => void;
@@ -101,6 +105,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   latestFrameImage: null,
   latestFrameByCamera: {},
   cameraPreviews: {},
+  bypassZonesByCamera: {},
   telemetry: { ...DEFAULT_TELEMETRY },
   telemetryByCamera: {},
   streamFps: 0,
@@ -141,6 +146,17 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
         },
       });
     }
+  },
+
+  setCameraBypassZones: (cameraId: string, bypass: boolean) => {
+    set((state) => ({
+      bypassZonesByCamera: { ...state.bypassZonesByCamera, [cameraId]: bypass },
+    }));
+    vdatWsClient.sendPayload({
+      type: 'set_camera_bypass_zones',
+      cameraId,
+      bypass,
+    });
   },
 
   setConnectionStatus: (status: StreamConnectionStatus) => {
@@ -186,6 +202,15 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     const src = normalizeFrameSrc(msg.image);
     set((state) => ({
       cameraPreviews: { ...state.cameraPreviews, [msg.cameraId]: src },
+    }));
+  },
+
+  handleCameraBypassZonesStatus: (msg: CameraBypassZonesStatusMessage) => {
+    set((state) => ({
+      bypassZonesByCamera: {
+        ...state.bypassZonesByCamera,
+        [msg.cameraId]: Boolean(msg.bypass),
+      },
     }));
   },
 
@@ -307,6 +332,9 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     set((state) => ({
       activeCameras: msg.activeCameras || [],
       cameraPreviews: { ...state.cameraPreviews, ...initialPreviews },
+      bypassZonesByCamera: msg.bypassZonesByCamera
+        ? { ...state.bypassZonesByCamera, ...msg.bypassZonesByCamera }
+        : state.bypassZonesByCamera,
       modelStatus: msg.modelStatus
         ? {
             profile: msg.modelStatus.profile === 'stock' ? 'stock' : 'trained',

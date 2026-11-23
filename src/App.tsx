@@ -1263,6 +1263,23 @@ export function App() {
                       <button
                         type="button"
                         role="menuitemcheckbox"
+                        aria-checked={Boolean(stream.bypassZonesByCamera[focusedCameraId])}
+                        disabled={!stream.isCameraLive}
+                        onKeyDown={handleCheckboxMenuKeyDown}
+                        onClick={() => {
+                          const currentlyBypassed = Boolean(
+                            stream.bypassZonesByCamera[focusedCameraId]
+                          );
+                          stream.setCameraBypassZones(focusedCameraId, !currentlyBypassed);
+                          closeAfterCheckboxAction(camMenuPopoverRef.current);
+                        }}
+                      >
+                        <span>Bypass Zone Annotations</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        role="menuitemcheckbox"
                         aria-checked={stream.isPaused}
                         disabled={!focusedChannel.isBroadcasting && !stream.isCameraLive}
                         onKeyDown={handleCheckboxMenuKeyDown}

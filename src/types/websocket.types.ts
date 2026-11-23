@@ -33,6 +33,7 @@ export interface ConnectionEstablishedMessage {
   type: 'connection_established';
   activeCameras: string[];
   cameraPreviews?: Record<string, string>;
+  bypassZonesByCamera?: Record<string, boolean>;
   modelStatus?: AiModelStatus;
   trackerStatus?: AiTrackerStatus;
   timestamp: number;
@@ -80,6 +81,13 @@ export interface CameraPreviewMessage {
   timestamp: number;
 }
 
+export interface CameraBypassZonesStatusMessage {
+  type: 'camera_bypass_zones_status';
+  cameraId: string;
+  bypass: boolean;
+  timestamp: number;
+}
+
 export interface CameraTelemetryMessage {
   type: 'camera_telemetry';
   cameraId: string;
@@ -121,6 +129,7 @@ export type InboundWSMessage =
   | AiTrackerStatusMessage
   | LiveFrameMessage
   | CameraPreviewMessage
+  | CameraBypassZonesStatusMessage
   | CameraSourceStatusMessage
   | CameraTelemetryMessage
   | CameraProfileSwitchedMessage

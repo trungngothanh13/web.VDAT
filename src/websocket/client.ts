@@ -6,6 +6,7 @@ import {
   FrameTelemetry,
   LiveFrameMessage,
   CameraPreviewMessage,
+  CameraBypassZonesStatusMessage,
   CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraProfileSwitchedMessage,
@@ -42,6 +43,7 @@ export class VdatWebSocketClient {
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
   private rawLiveFrameListeners = new Set<MessageHandler<RawLiveFramePacket>>();
   private cameraPreviewListeners = new Set<MessageHandler<CameraPreviewMessage>>();
+  private cameraBypassZonesListeners = new Set<MessageHandler<CameraBypassZonesStatusMessage>>();
   private cameraSourceStatusListeners = new Set<MessageHandler<CameraSourceStatusMessage>>();
   private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
   private lastFocusedTelemetryAt = new Map<string, number>();
@@ -192,6 +194,13 @@ export class VdatWebSocketClient {
     return () => this.cameraPreviewListeners.delete(handler);
   }
 
+  public onCameraBypassZonesStatus(
+    handler: MessageHandler<CameraBypassZonesStatusMessage>
+  ): () => void {
+    this.cameraBypassZonesListeners.add(handler);
+    return () => this.cameraBypassZonesListeners.delete(handler);
+  }
+
   public onCameraSourceStatus(handler: MessageHandler<CameraSourceStatusMessage>): () => void {
     this.cameraSourceStatusListeners.add(handler);
     return () => this.cameraSourceStatusListeners.delete(handler);
@@ -325,6 +334,9 @@ export class VdatWebSocketClient {
         break;
       case 'camera_preview':
         for (const listener of this.cameraPreviewListeners) listener(msg);
+        break;
+      case 'camera_bypass_zones_status':
+        for (const listener of this.cameraBypassZonesListeners) listener(msg);
         break;
       case 'camera_source_status':
         for (const listener of this.cameraSourceStatusListeners) listener(msg);

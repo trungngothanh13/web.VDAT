@@ -44,6 +44,10 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.handleCameraPreview(msg);
     });
 
+    const unsubBypassZones = vdatWsClient.onCameraBypassZonesStatus((msg) => {
+      store.handleCameraBypassZonesStatus(msg);
+    });
+
     const unsubSourceStatus = vdatWsClient.onCameraSourceStatus((msg) => {
       store.handleCameraSourceStatus(msg);
     });
@@ -82,6 +86,7 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       unsubStatus,
       unsubFrame,
       unsubPreview,
+      unsubBypassZones,
       unsubSourceStatus,
       unsubTelemetry,
       unsubCamStatus,
@@ -118,6 +123,7 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     latestFrameImage: store.latestFrameImage,
     latestFrameByCamera: store.latestFrameByCamera,
     cameraPreviews: store.cameraPreviews,
+    bypassZonesByCamera: store.bypassZonesByCamera,
     telemetry: store.telemetry,
     telemetryByCamera: store.telemetryByCamera,
     streamFps: store.streamFps,
@@ -127,6 +133,8 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     switchAiModel: (profile: 'trained' | 'stock') => store.switchAiModel(profile),
     switchAiTracker: (tracker: 'bytetrack' | 'botsort' | 'deepsort') =>
       store.switchAiTracker(tracker),
+    setCameraBypassZones: (cameraId: string, bypass: boolean) =>
+      store.setCameraBypassZones(cameraId, bypass),
     togglePause: () => store.togglePause(),
     setPaused: (paused: boolean) => store.setPaused(paused),
     reconnect: () => vdatWsClient.reconnect(),
