@@ -4,7 +4,6 @@ import {
   InboundWSMessage,
   StreamConnectionStatus,
   FrameTelemetry,
-  LiveFrameMessage,
   CameraPreviewMessage,
   CameraBypassZonesStatusMessage,
   CameraSourceStatusMessage,
@@ -18,7 +17,7 @@ import {
   ConnectionEstablishedMessage,
 } from '../types/websocket.types';
 
-export interface RawLiveFramePacket {
+interface RawLiveFramePacket {
   cameraId: string;
   blob: Blob;
   telemetry?: FrameTelemetry;
@@ -28,7 +27,7 @@ export interface RawLiveFramePacket {
 type MessageHandler<T> = (data: T) => void;
 type StatusHandler = (status: StreamConnectionStatus) => void;
 
-export class VdatWebSocketClient {
+class VdatWebSocketClient {
   private url: string;
   private ws: WebSocket | null = null;
   private status: StreamConnectionStatus = 'disconnected';
@@ -40,7 +39,6 @@ export class VdatWebSocketClient {
   private textDecoder = new TextDecoder();
 
   // Event listener registries
-  private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
   private rawLiveFrameListeners = new Set<MessageHandler<RawLiveFramePacket>>();
   private cameraPreviewListeners = new Set<MessageHandler<CameraPreviewMessage>>();
   private cameraBypassZonesListeners = new Set<MessageHandler<CameraBypassZonesStatusMessage>>();
@@ -60,19 +58,6 @@ export class VdatWebSocketClient {
 
   constructor(url: string = env.wsUrl) {
     this.url = url;
-  }
-
-  public setUrl(newUrl: string): void {
-    if (this.url !== newUrl) {
-      this.url = newUrl;
-      if (this.status === 'connected' || this.status === 'connecting') {
-        this.reconnect();
-      }
-    }
-  }
-
-  public getStatus(): StreamConnectionStatus {
-    return this.status;
   }
 
   public connect(): void {
@@ -184,11 +169,6 @@ export class VdatWebSocketClient {
   }
 
   // Event Subscription Methods
-  public onLiveFrame(handler: MessageHandler<LiveFrameMessage>): () => void {
-    this.liveFrameListeners.add(handler);
-    return () => this.liveFrameListeners.delete(handler);
-  }
-
   public onRawLiveFrame(handler: MessageHandler<RawLiveFramePacket>): () => void {
     this.rawLiveFrameListeners.add(handler);
     return () => this.rawLiveFrameListeners.delete(handler);
@@ -279,65 +259,52 @@ export class VdatWebSocketClient {
     const headerStr = this.textDecoder.decode(new Uint8Array(buffer, 4, headerLen));
     const header = JSON.parse(headerStr) as Record<string, any>;
 
-    if (header.type === 'live_frame') {
-      const jpegBytes = new Uint8Array(buffer, 4 + headerLen);
-      const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
-      const ts = header.timestamp || Date.now();
-      const cameraId = String(header.cameraId || 'cam-01');
-      this.latestFrameBlobByCamera.set(cameraId, blob);
+    if (header.type !== 'live_frame') return;
 
-      if (this.rawLiveFrameListeners.size > 0) {
-        const pkt: RawLiveFramePacket = {
+    const jpegBytes = new Uint8Array(buffer, 4 + headerLen);
+    const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+    const ts = header.timestamp || Date.now();
+    const cameraId = String(header.cameraId || 'cam-01');
+    this.latestFrameBlobByCamera.set(cameraId, blob);
+
+    if (this.rawLiveFrameListeners.size > 0) {
+      const pkt: RawLiveFramePacket = {
+        cameraId,
+        blob,
+        telemetry: header.telemetry,
+        timestamp: ts,
+      };
+      for (const listener of this.rawLiveFrameListeners) {
+        listener(pkt);
+      }
+    }
+
+    // Throttle React/Zustand HUD telemetry updates (~5 Hz) while updating immediately on violation or light changes
+    if (header.telemetry) {
+      const prevMeta = this.lastFocusedTelemetryMeta.get(cameraId);
+      const nextViol = header.telemetry.violations_count;
+      const nextLight = header.telemetry.light_state;
+      const changedCritical =
+        !prevMeta || prevMeta.violations !== nextViol || prevMeta.light !== nextLight;
+      const lastAt = this.lastFocusedTelemetryAt.get(cameraId) ?? 0;
+      if (changedCritical || ts - lastAt >= 200) {
+        this.lastFocusedTelemetryAt.set(cameraId, ts);
+        this.lastFocusedTelemetryMeta.set(cameraId, {
+          violations: nextViol,
+          light: nextLight,
+        });
+        this.routeMessage({
+          type: 'camera_telemetry',
           cameraId,
-          blob,
           telemetry: header.telemetry,
           timestamp: ts,
-        };
-        for (const listener of this.rawLiveFrameListeners) {
-          listener(pkt);
-        }
-
-        // Throttle React/Zustand HUD telemetry updates (~5 Hz) while still updating immediately on violation or light changes
-        if (header.telemetry) {
-          const prevMeta = this.lastFocusedTelemetryMeta.get(cameraId);
-          const nextViol = header.telemetry.violations_count;
-          const nextLight = header.telemetry.light_state;
-          const changedCritical =
-            !prevMeta || prevMeta.violations !== nextViol || prevMeta.light !== nextLight;
-          const lastAt = this.lastFocusedTelemetryAt.get(cameraId) ?? 0;
-          if (changedCritical || ts - lastAt >= 200) {
-            this.lastFocusedTelemetryAt.set(cameraId, ts);
-            this.lastFocusedTelemetryMeta.set(cameraId, {
-              violations: nextViol,
-              light: nextLight,
-            });
-            this.routeMessage({
-              type: 'camera_telemetry',
-              cameraId,
-              telemetry: header.telemetry,
-              timestamp: ts,
-            });
-          }
-        }
-        return;
+        });
       }
-
-      const blobUrl = URL.createObjectURL(blob);
-      this.routeMessage({
-        type: 'live_frame',
-        cameraId,
-        telemetry: header.telemetry,
-        image: blobUrl,
-        timestamp: ts,
-      } as LiveFrameMessage);
     }
   }
 
   private routeMessage(msg: InboundWSMessage): void {
     switch (msg.type) {
-      case 'live_frame':
-        for (const listener of this.liveFrameListeners) listener(msg);
-        break;
       case 'camera_preview':
         for (const listener of this.cameraPreviewListeners) listener(msg);
         break;
@@ -377,9 +344,6 @@ export class VdatWebSocketClient {
       case 'connection_established':
         for (const listener of this.connectionListeners) listener(msg);
         break;
-      case 'pong':
-        // Heartbeat acknowledged
-        break;
     }
   }
 
@@ -413,6 +377,4 @@ export class VdatWebSocketClient {
   }
 }
 
-// Global singleton instance for application-wide use
 export const vdatWsClient = new VdatWebSocketClient();
-

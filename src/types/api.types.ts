@@ -10,10 +10,3 @@ export interface HealthCheckResponse {
   timestamp: string;
 }
 
-export interface EvidenceUploadResponse {
-  message: string;
-  fileUrl: string;
-  filename: string;
-  linkedViolation: string | null;
-}
-

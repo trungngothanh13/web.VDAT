@@ -19,18 +19,3 @@ export interface LoginResponse {
   user: User;
 }
 
-export interface JWTPayload {
-  id: string;
-  role: Role;
-  exp: number;
-  iat: number;
-}
-
-export interface AuthState {
-  user: User | null;
-  token: string | null;
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  error: string | null;
-}
-

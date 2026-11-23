@@ -1,4 +1,4 @@
-export interface NotificationOptions {
+interface NotificationOptions {
   title: string;
   body?: string;
   icon?: string;
@@ -6,19 +6,12 @@ export interface NotificationOptions {
   onClick?: () => void;
 }
 
-export function isNotificationSupported(): boolean {
-  return typeof window !== 'undefined' && 'Notification' in window;
-}
-
-export async function requestNotificationPermission(): Promise<NotificationPermission> {
-  if (!isNotificationSupported()) {
-    return 'denied';
-  }
-  return Notification.requestPermission();
-}
-
 export function showBrowserNotification(options: NotificationOptions): Notification | null {
-  if (!isNotificationSupported() || Notification.permission !== 'granted') {
+  if (
+    typeof window === 'undefined' ||
+    !('Notification' in window) ||
+    Notification.permission !== 'granted'
+  ) {
     return null;
   }
 
@@ -38,4 +31,3 @@ export function showBrowserNotification(options: NotificationOptions): Notificat
 
   return notification;
 }
-

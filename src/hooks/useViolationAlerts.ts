@@ -6,10 +6,12 @@ import { playViolationAlertChime } from '../utils/sound';
 import { showBrowserNotification } from '../utils/notifications';
 
 export function useViolationAlerts() {
-  const store = useViolationStore();
+  const liveAlerts = useViolationStore((s) => s.liveAlerts);
   const settings = useSettingsStore();
 
   useEffect(() => {
+    const store = useViolationStore.getState();
+
     // 1. Listen for new violation alerts pushed in real-time
     const unsubAlert = vdatWsClient.onViolationAlert((msg) => {
       const violation = msg.violation;
@@ -47,12 +49,6 @@ export function useViolationAlerts() {
   ]);
 
   return {
-    liveAlerts: store.liveAlerts,
-    unreadAlertCount: store.unreadAlertCount,
-    selectedViolation: store.selectedViolation,
-    clearUnreadCount: () => store.clearUnreadCount(),
-    setSelectedViolation: (v: any) => store.setSelectedViolation(v),
-    clearLiveAlerts: () => store.clearLiveAlerts(),
+    liveAlerts,
   };
 }
-

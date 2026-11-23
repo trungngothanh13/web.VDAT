@@ -1,4 +1,5 @@
-import { ViolationStatus, VehicleClass } from '../types/violation.types';
+import { Camera } from '../types/camera.types';
+import { ViolationStatus } from '../types/violation.types';
 import { TrafficLightState } from '../types/websocket.types';
 
 export const STORAGE_KEYS = {
@@ -32,44 +33,7 @@ export const VIOLATION_STATUS_CONFIG: Record<
   },
 };
 
-export const VEHICLE_CLASS_CONFIG: Record<
-  string,
-  { label: string; color: string; icon: string }
-> = {
-  motorcycle: {
-    label: 'Motorcycle',
-    color: '#38bdf8', // Sky
-    icon: 'Bike',
-  },
-  car: {
-    label: 'Car',
-    color: '#818cf8', // Indigo
-    icon: 'Car',
-  },
-  truck: {
-    label: 'Truck',
-    color: '#fb923c', // Orange
-    icon: 'Truck',
-  },
-  bus: {
-    label: 'Bus',
-    color: '#facc15', // Yellow
-    icon: 'Bus',
-  },
-};
-
-export const getVehicleConfig = (vehicleClass: VehicleClass) => {
-  const normalized = vehicleClass.toLowerCase();
-  return (
-    VEHICLE_CLASS_CONFIG[normalized] || {
-      label: vehicleClass.charAt(0).toUpperCase() + vehicleClass.slice(1),
-      color: '#94a3b8',
-      icon: 'HelpCircle',
-    }
-  );
-};
-
-export const LIGHT_STATE_CONFIG: Record<
+const LIGHT_STATE_CONFIG: Record<
   string,
   { label: string; color: string; glow: string }
 > = {
@@ -107,9 +71,44 @@ export const DEFAULT_APP_SETTINGS = {
   soundAlertsEnabled: true,
   soundAlertVolume: 0.7, // 0.0 - 1.0
   browserNotificationsEnabled: true,
-  autoDownloadProofVideos: false,
   maxRecentAlertsInFeed: 50,
-  targetStreamFps: 30,
-  darkTheme: true,
 };
 
+export const EXPIRED_THUMB_SVG =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 68">' +
+      '<rect width="108" height="68" fill="#0f172a"/>' +
+      '<rect x="3" y="3" width="102" height="62" rx="4" fill="none" stroke="#334155" stroke-dasharray="4 3" stroke-width="1"/>' +
+      '<circle cx="54" cy="24" r="9" fill="none" stroke="#f59e0b" stroke-width="1.6"/>' +
+      '<path d="M54 19v5l3 2" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-linecap="round"/>' +
+      '<text x="54" y="49" fill="#fcd34d" font-family="Inter,sans-serif" font-size="9.5" font-weight="700" letter-spacing="0.8" text-anchor="middle">EXPIRED</text>' +
+      '</svg>'
+  );
+
+export const DEFAULT_CAMERA_SLOTS: Camera[] = [
+  {
+    id: 'cam-01',
+    name: 'Camera 01 (Primary)',
+    location: 'Intersection 1',
+    isActive: false,
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'cam-02',
+    name: 'Camera 02',
+    location: 'Intersection 2',
+    isActive: false,
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'cam-03',
+    name: 'Camera 03',
+    location: 'Intersection 3',
+    isActive: false,
+    createdAt: '',
+    updatedAt: '',
+  },
+];

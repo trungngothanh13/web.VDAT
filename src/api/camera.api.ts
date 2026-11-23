@@ -24,14 +24,6 @@ export const cameraApi = {
   },
 
   /**
-   * Get single camera details and zone configuration
-   */
-  async getCamera(id: string): Promise<Camera> {
-    const { data } = await apiClient.get<Camera>(`/api/cameras/${encodeURIComponent(id)}`);
-    return data;
-  },
-
-  /**
    * Register a new camera slot (Admin only)
    */
   async createCamera(payload: { id: string; name: string; location?: string }): Promise<Camera> {

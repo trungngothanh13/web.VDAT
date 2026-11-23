@@ -1,6 +1,13 @@
 export type Point2D = [number, number];
 export type Polygon = Point2D[];
 
+export type TransmitterSourceType = 'none' | 'video_file' | 'laptop_webcam';
+
+export interface VideoInputDevice {
+  deviceId: string;
+  label: string;
+}
+
 export interface TrafficLightSamplingBox {
   x: number;
   y: number;
@@ -30,8 +37,6 @@ export interface ZoneProfileConfig {
   version: number;
   updatedAt: string;
 }
-
-export type CameraConfig = ZoneProfileConfig;
 
 export interface Camera {
   id: string;

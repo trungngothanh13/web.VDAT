@@ -1,99 +1,44 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
 import { vdatWsClient } from '../websocket/client';
 import { useStreamStore } from '../stores/stream.store';
 import { CAMERAS_QUERY_KEY } from './useCameras';
 
-export interface UseLiveStreamOptions {
-  cameraId?: string;
-  autoConnect?: boolean;
-}
-
-export function useLiveStream(options?: UseLiveStreamOptions) {
+export function useLiveStream(autoConnect: boolean = true) {
   const queryClient = useQueryClient();
-  const store = useStreamStore();
-  const optionsCameraId = options?.cameraId;
-  const autoConnect = options?.autoConnect ?? true;
+  const state = useStreamStore(
+    useShallow((s) => ({
+      selectedCameraId: s.selectedCameraId,
+      activeCameras: s.activeCameras,
+      modelStatus: s.modelStatus,
+      trackerStatus: s.trackerStatus,
+      connectionStatus: s.connectionStatus,
+      cameraPreviews: s.cameraPreviews,
+      bypassZonesByCamera: s.bypassZonesByCamera,
+      isPaused: s.isPaused,
+    }))
+  );
 
-  const unsubscribeRefs = useRef<Array<() => void>>([]);
-
-  // Sync selected camera if passed in options
-  useEffect(() => {
-    if (optionsCameraId && optionsCameraId !== store.selectedCameraId) {
-      store.setSelectedCamera(optionsCameraId);
-    }
-  }, [optionsCameraId]);
-
-  // Connect to WebSocket and subscribe to streaming events
   useEffect(() => {
     if (!autoConnect) return;
+    const store = useStreamStore.getState();
 
     vdatWsClient.connect();
 
-    // Subscribe to status updates
-    const unsubStatus = vdatWsClient.onStatusChange((status) => {
-      store.setConnectionStatus(status);
-    });
-
-    // Subscribe to incoming live frames, periodic minicam previews, and AI-hosted source status updates
-    const unsubFrame = vdatWsClient.onLiveFrame((msg) => {
-      store.handleLiveFrame(msg);
-    });
-
-    const unsubPreview = vdatWsClient.onCameraPreview((msg) => {
-      store.handleCameraPreview(msg);
-    });
-
-    const unsubBypassZones = vdatWsClient.onCameraBypassZonesStatus((msg) => {
-      store.handleCameraBypassZonesStatus(msg);
-    });
-
-    const unsubSourceStatus = vdatWsClient.onCameraSourceStatus((msg) => {
-      store.handleCameraSourceStatus(msg);
-    });
-
-    // Subscribe to lightweight telemetry for all cameras
-    const unsubTelemetry = vdatWsClient.onCameraTelemetry((msg) => {
-      store.handleCameraTelemetry(msg);
-    });
-
-    // Subscribe to camera status updates (online / offline)
-    const unsubCamStatus = vdatWsClient.onCameraStatus((msg) => {
-      store.handleCameraStatus(msg);
-    });
-
-    // Subscribe to live AI model toggle updates (trained vs stock legacy)
-    const unsubModelStatus = vdatWsClient.onAiModelStatus((msg) => {
-      store.handleAiModelStatus(msg);
-    });
-
-    // Subscribe to live AI tracker toggle updates (bytetrack / botsort / deepsort)
-    const unsubTrackerStatus = vdatWsClient.onAiTrackerStatus((msg) => {
-      store.handleAiTrackerStatus(msg);
-    });
-
-    // Subscribe to connection established handshake
-    const unsubConn = vdatWsClient.onConnectionEstablished((msg) => {
-      store.handleConnectionEstablished(msg);
-    });
-
-    // Refresh camera profile configs when a slot auto-binds to a new source
-    const unsubProfile = vdatWsClient.onCameraProfileSwitched(() => {
-      void queryClient.invalidateQueries({ queryKey: [CAMERAS_QUERY_KEY] });
-    });
-
-    unsubscribeRefs.current = [
-      unsubStatus,
-      unsubFrame,
-      unsubPreview,
-      unsubBypassZones,
-      unsubSourceStatus,
-      unsubTelemetry,
-      unsubCamStatus,
-      unsubModelStatus,
-      unsubTrackerStatus,
-      unsubConn,
-      unsubProfile,
+    const unsubscribers = [
+      vdatWsClient.onStatusChange((status) => store.setConnectionStatus(status)),
+      vdatWsClient.onCameraPreview((msg) => store.handleCameraPreview(msg)),
+      vdatWsClient.onCameraBypassZonesStatus((msg) => store.handleCameraBypassZonesStatus(msg)),
+      vdatWsClient.onCameraSourceStatus((msg) => store.handleCameraSourceStatus(msg)),
+      vdatWsClient.onCameraTelemetry((msg) => store.handleCameraTelemetry(msg)),
+      vdatWsClient.onCameraStatus((msg) => store.handleCameraStatus(msg)),
+      vdatWsClient.onAiModelStatus((msg) => store.handleAiModelStatus(msg)),
+      vdatWsClient.onAiTrackerStatus((msg) => store.handleAiTrackerStatus(msg)),
+      vdatWsClient.onConnectionEstablished((msg) => store.handleConnectionEstablished(msg)),
+      vdatWsClient.onCameraProfileSwitched(() => {
+        void queryClient.invalidateQueries({ queryKey: [CAMERAS_QUERY_KEY] });
+      }),
     ];
 
     // Periodically ask AI engine for fresh lightweight minicam thumbnails once every 60s
@@ -103,41 +48,22 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
 
     return () => {
       clearInterval(previewTimer);
-      for (const unsub of unsubscribeRefs.current) {
+      for (const unsub of unsubscribers) {
         unsub();
       }
-      unsubscribeRefs.current = [];
     };
-  }, [autoConnect]);
+  }, [autoConnect, queryClient]);
 
-  const isCameraLive = store.activeCameras.includes(store.selectedCameraId);
+  const actions = useStreamStore.getState();
 
   return {
-    selectedCameraId: store.selectedCameraId,
-    activeCameras: store.activeCameras,
-    modelStatus: store.modelStatus,
-    trackerStatus: store.trackerStatus,
-    connectionStatus: store.connectionStatus,
-    isConnected: store.connectionStatus === 'connected',
-    isCameraLive,
-    latestFrameImage: store.latestFrameImage,
-    latestFrameByCamera: store.latestFrameByCamera,
-    cameraPreviews: store.cameraPreviews,
-    bypassZonesByCamera: store.bypassZonesByCamera,
-    telemetry: store.telemetry,
-    telemetryByCamera: store.telemetryByCamera,
-    streamFps: store.streamFps,
-    isPaused: store.isPaused,
-    lastFrameTimestamp: store.lastFrameTimestamp,
-    setSelectedCamera: (id: string) => store.setSelectedCamera(id),
-    switchAiModel: (profile: 'trained' | 'stock') => store.switchAiModel(profile),
-    switchAiTracker: (tracker: 'bytetrack' | 'botsort' | 'deepsort') =>
-      store.switchAiTracker(tracker),
-    setCameraBypassZones: (cameraId: string, bypass: boolean) =>
-      store.setCameraBypassZones(cameraId, bypass),
-    togglePause: () => store.togglePause(),
-    setPaused: (paused: boolean) => store.setPaused(paused),
-    reconnect: () => vdatWsClient.reconnect(),
+    ...state,
+    isConnected: state.connectionStatus === 'connected',
+    isCameraLive: state.activeCameras.includes(state.selectedCameraId),
+    setSelectedCamera: actions.setSelectedCamera,
+    switchAiModel: actions.switchAiModel,
+    switchAiTracker: actions.switchAiTracker,
+    setCameraBypassZones: actions.setCameraBypassZones,
+    togglePause: actions.togglePause,
   };
 }
-

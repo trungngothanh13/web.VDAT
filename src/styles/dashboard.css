@@ -892,43 +892,6 @@
     background: rgba(15, 23, 42, 0.4);
   }
 
-  .camera-tile-status-pill {
-    font-size: 0.64rem;
-    padding-block: 0.12rem;
-    padding-inline: 0.45rem;
-  }
-
-  .camera-tile-footer {
-    display: grid;
-    gap: 0.45rem;
-    padding-block: 0.55rem;
-    padding-inline: 0.75rem;
-    align-content: start;
-  }
-
-  .camera-tile-controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    align-items: safe center;
-  }
-
-  .camera-tile-controls select {
-    flex: 1 1 130px;
-    min-inline-size: 0;
-  }
-
-  .add-camera-form {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-xs);
-    align-items: safe center;
-    padding-block: var(--space-xs);
-    padding-inline: var(--space-md);
-    border-block-end: 1px solid var(--border);
-    background: rgba(15, 23, 42, 0.35);
-  }
-
   .add-camera-input {
     background: rgba(0, 0, 0, 0.38);
     border: 1px solid var(--border-strong);
@@ -937,21 +900,6 @@
     padding-inline: 0.6rem;
     font-size: 0.78rem;
     color: var(--text);
-  }
-
-  .inline-zone-drawer {
-    border-block-start: 1px solid var(--border);
-    background: rgba(15, 23, 42, 0.45);
-    padding: var(--space-md);
-    display: grid;
-    gap: var(--space-md);
-  }
-
-  .inline-zone-lists {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: var(--space-md);
-    align-items: start;
   }
 
   .crossing-toggle-label {

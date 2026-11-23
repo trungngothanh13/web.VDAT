@@ -4,7 +4,6 @@ import { vdatWsClient } from '../websocket/client';
 import {
   FrameTelemetry,
   StreamConnectionStatus,
-  LiveFrameMessage,
   CameraPreviewMessage,
   CameraBypassZonesStatusMessage,
   CameraSourceStatusMessage,
@@ -37,33 +36,17 @@ function normalizeFrameSrc(image: string): string {
   return `data:image/jpeg;base64,${image}`;
 }
 
-function revokeBlobUrlSoon(url?: string | null): void {
-  if (url && url.startsWith('blob:')) {
-    setTimeout(() => {
-      try {
-        URL.revokeObjectURL(url);
-      } catch {
-        // Ignore already-revoked URLs
-      }
-    }, 250);
-  }
-}
-
 interface StreamStoreState {
   selectedCameraId: string;
   activeCameras: string[];
   modelStatus: AiModelStatus;
   trackerStatus: AiTrackerStatus;
   connectionStatus: StreamConnectionStatus;
-  latestFrameImage: string | null;
-  latestFrameByCamera: Record<string, string>;
   cameraPreviews: Record<string, string>;
   bypassZonesByCamera: Record<string, boolean>;
   telemetry: FrameTelemetry;
   telemetryByCamera: Record<string, FrameTelemetry>;
-  streamFps: number;
   isPaused: boolean;
-  lastFrameTimestamp: number;
 
   // Actions
   setSelectedCamera: (cameraId: string) => void;
@@ -72,11 +55,8 @@ interface StreamStoreState {
   setCameraBypassZones: (cameraId: string, bypass: boolean) => void;
   setConnectionStatus: (status: StreamConnectionStatus) => void;
   togglePause: () => void;
-  setPaused: (paused: boolean) => void;
-  setStreamFps: (fps: number) => void;
 
   // WebSocket message handlers
-  handleLiveFrame: (msg: LiveFrameMessage) => void;
   handleCameraPreview: (msg: CameraPreviewMessage) => void;
   handleCameraBypassZonesStatus: (msg: CameraBypassZonesStatusMessage) => void;
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => void;
@@ -85,7 +65,6 @@ interface StreamStoreState {
   handleAiModelStatus: (msg: AiModelStatusMessage) => void;
   handleAiTrackerStatus: (msg: AiTrackerStatusMessage) => void;
   handleConnectionEstablished: (msg: ConnectionEstablishedMessage) => void;
-  resetStream: () => void;
 }
 
 export const useStreamStore = create<StreamStoreState>((set, get) => ({
@@ -102,22 +81,17 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     switching: false,
   },
   connectionStatus: 'disconnected',
-  latestFrameImage: null,
-  latestFrameByCamera: {},
   cameraPreviews: {},
   bypassZonesByCamera: {},
   telemetry: { ...DEFAULT_TELEMETRY },
   telemetryByCamera: {},
-  streamFps: 0,
   isPaused: false,
-  lastFrameTimestamp: 0,
 
   setSelectedCamera: (cameraId: string) => {
     vdatWsClient.sendPayload({ type: 'watch_camera', cameraId });
-    const { latestFrameByCamera, telemetryByCamera } = get();
+    const { telemetryByCamera } = get();
     set({
       selectedCameraId: cameraId,
-      latestFrameImage: latestFrameByCamera[cameraId] ?? null,
       telemetry: telemetryByCamera[cameraId] ?? { ...DEFAULT_TELEMETRY },
     });
   },
@@ -164,38 +138,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   },
 
   togglePause: () => set((state) => ({ isPaused: !state.isPaused })),
-  setPaused: (paused: boolean) => set({ isPaused: paused }),
-  setStreamFps: (fps: number) => set({ streamFps: fps }),
-
-  handleLiveFrame: (msg: LiveFrameMessage) => {
-    const { selectedCameraId, isPaused, latestFrameByCamera, telemetryByCamera } = get();
-    const nextSrc = normalizeFrameSrc(msg.image);
-    const prevSrc = latestFrameByCamera[msg.cameraId];
-    if (prevSrc && prevSrc !== nextSrc) {
-      revokeBlobUrlSoon(prevSrc);
-    }
-
-    const updatedFrames = { ...latestFrameByCamera, [msg.cameraId]: nextSrc };
-    const updatedTelemetry = msg.telemetry
-      ? { ...telemetryByCamera, [msg.cameraId]: msg.telemetry }
-      : telemetryByCamera;
-
-    if (msg.cameraId === selectedCameraId && !isPaused) {
-      set({
-        latestFrameByCamera: updatedFrames,
-        telemetryByCamera: updatedTelemetry,
-        latestFrameImage: nextSrc,
-        telemetry: msg.telemetry || { ...DEFAULT_TELEMETRY },
-        lastFrameTimestamp: msg.timestamp || Date.now(),
-        streamFps: msg.telemetry?.fps ?? get().streamFps,
-      });
-    } else {
-      set({
-        latestFrameByCamera: updatedFrames,
-        telemetryByCamera: updatedTelemetry,
-      });
-    }
-  },
 
   handleCameraPreview: (msg: CameraPreviewMessage) => {
     if (!msg.image) return;
@@ -217,21 +159,12 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => {
     if (msg.status !== 'stopped' && msg.status !== 'ended') return;
     set((state) => {
-      const updatedFrames = { ...state.latestFrameByCamera };
-      revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
-      delete updatedFrames[msg.cameraId];
       const updatedPreviews = { ...state.cameraPreviews };
       delete updatedPreviews[msg.cameraId];
       const isFocused = msg.cameraId === state.selectedCameraId;
       return {
-        latestFrameByCamera: updatedFrames,
         cameraPreviews: updatedPreviews,
-        ...(isFocused
-          ? {
-              latestFrameImage: null,
-              telemetry: { ...DEFAULT_TELEMETRY },
-            }
-          : {}),
+        ...(isFocused ? { telemetry: { ...DEFAULT_TELEMETRY } } : {}),
       };
     });
   },
@@ -243,7 +176,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     const prevTel = state.telemetryByCamera[msg.cameraId];
     const now = Date.now();
 
-    // Throttle unfocused wall telemetry updates so 6 cameras don't trigger 90 full React renders/sec
+    // Throttle unfocused wall telemetry updates so 6 cameras don't trigger excessive React renders
     if (
       !isFocused &&
       prevTel &&
@@ -255,18 +188,12 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     }
     lastTelemetryUpdateAt[msg.cameraId] = now;
 
-    set((curr) => {
-      const updatedTelemetry = { ...curr.telemetryByCamera, [msg.cameraId]: msg.telemetry };
-      return {
-        telemetryByCamera: updatedTelemetry,
-        ...(msg.cameraId === curr.selectedCameraId && !curr.isPaused
-          ? {
-              telemetry: msg.telemetry,
-              streamFps: msg.telemetry.fps ?? curr.streamFps,
-            }
-          : {}),
-      };
-    });
+    set((curr) => ({
+      telemetryByCamera: { ...curr.telemetryByCamera, [msg.cameraId]: msg.telemetry },
+      ...(msg.cameraId === curr.selectedCameraId && !curr.isPaused
+        ? { telemetry: msg.telemetry }
+        : {}),
+    }));
   },
 
   handleCameraStatus: (msg: CameraStatusMessage) => {
@@ -275,26 +202,17 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       if (msg.status === 'ONLINE') {
         activeSet.add(msg.cameraId);
         return { activeCameras: Array.from(activeSet) };
-      } else {
-        activeSet.delete(msg.cameraId);
-        const updatedFrames = { ...state.latestFrameByCamera };
-        revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
-        delete updatedFrames[msg.cameraId];
-        const updatedPreviews = { ...state.cameraPreviews };
-        delete updatedPreviews[msg.cameraId];
-        const isCurrentCam = msg.cameraId === state.selectedCameraId;
-        return {
-          activeCameras: Array.from(activeSet),
-          latestFrameByCamera: updatedFrames,
-          cameraPreviews: updatedPreviews,
-          ...(isCurrentCam
-            ? {
-                latestFrameImage: null,
-                telemetry: { ...DEFAULT_TELEMETRY },
-              }
-            : {}),
-        };
       }
+
+      activeSet.delete(msg.cameraId);
+      const updatedPreviews = { ...state.cameraPreviews };
+      delete updatedPreviews[msg.cameraId];
+      const isCurrentCam = msg.cameraId === state.selectedCameraId;
+      return {
+        activeCameras: Array.from(activeSet),
+        cameraPreviews: updatedPreviews,
+        ...(isCurrentCam ? { telemetry: { ...DEFAULT_TELEMETRY } } : {}),
+      };
     });
   },
 
@@ -354,18 +272,4 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
         : state.trackerStatus,
     }));
   },
-
-  resetStream: () => {
-    const prevFrames = get().latestFrameByCamera;
-    for (const url of Object.values(prevFrames)) {
-      revokeBlobUrlSoon(url);
-    }
-    set({
-      latestFrameImage: null,
-      latestFrameByCamera: {},
-      telemetry: { ...DEFAULT_TELEMETRY },
-      telemetryByCamera: {},
-    });
-  },
 }));
-

@@ -5,7 +5,7 @@ import { DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT } from '../config/constants
 import type {
   TransmitterSourceType,
   VideoInputDevice,
-} from './useCameraTransmitter';
+} from '../types/camera.types';
 
 export interface CameraChannelState {
   cameraId: string;
@@ -67,7 +67,7 @@ function packBinarySourceFrame(header: Record<string, unknown>, frameBytes: Uint
   return out;
 }
 
-export function createInitialChannelState(cameraId: string): CameraChannelState {
+function createInitialChannelState(cameraId: string): CameraChannelState {
   return {
     cameraId,
     sourceType: 'none',

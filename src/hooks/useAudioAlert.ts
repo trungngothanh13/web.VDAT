@@ -1,29 +1,11 @@
-import { useCallback } from 'react';
-import { playViolationAlertChime, playSuccessTone } from '../utils/sound';
 import { useSettingsStore } from '../stores/settings.store';
 
 export function useAudioAlert() {
-  const settings = useSettingsStore();
-
-  const playViolationChime = useCallback(() => {
-    if (settings.soundAlertsEnabled) {
-      playViolationAlertChime(settings.soundAlertVolume);
-    }
-  }, [settings.soundAlertsEnabled, settings.soundAlertVolume]);
-
-  const playSuccess = useCallback(() => {
-    if (settings.soundAlertsEnabled) {
-      playSuccessTone(settings.soundAlertVolume);
-    }
-  }, [settings.soundAlertsEnabled, settings.soundAlertVolume]);
+  const soundAlertsEnabled = useSettingsStore((s) => s.soundAlertsEnabled);
+  const setSoundAlertsEnabled = useSettingsStore((s) => s.setSoundAlertsEnabled);
 
   return {
-    playViolationChime,
-    playSuccess,
-    soundAlertsEnabled: settings.soundAlertsEnabled,
-    soundAlertVolume: settings.soundAlertVolume,
-    setSoundAlertsEnabled: settings.setSoundAlertsEnabled,
-    setSoundAlertVolume: settings.setSoundAlertVolume,
+    soundAlertsEnabled,
+    setSoundAlertsEnabled,
   };
 }
-

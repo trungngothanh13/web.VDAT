@@ -56,14 +56,6 @@ export interface CameraStatusMessage {
   timestamp: number;
 }
 
-export interface LiveFrameMessage {
-  type: 'live_frame';
-  cameraId: string;
-  telemetry: FrameTelemetry;
-  image: string; // Base64 JPEG string or blob URL
-  timestamp: number;
-}
-
 export interface CameraSourceStatusMessage {
   type: 'camera_source_status';
   cameraId: string;
@@ -117,31 +109,18 @@ export interface CameraProfileSwitchedMessage {
   timestamp: number;
 }
 
-export interface PongMessage {
-  type: 'pong';
-  timestamp: number;
-}
-
 export type InboundWSMessage =
   | ConnectionEstablishedMessage
   | CameraStatusMessage
   | AiModelStatusMessage
   | AiTrackerStatusMessage
-  | LiveFrameMessage
   | CameraPreviewMessage
   | CameraBypassZonesStatusMessage
   | CameraSourceStatusMessage
   | CameraTelemetryMessage
   | CameraProfileSwitchedMessage
   | ViolationAlertMessage
-  | EvidenceClipUpdateMessage
-  | PongMessage;
-
-export interface PingMessage {
-  type: 'ping';
-}
-
-export type OutboundWSMessage = PingMessage;
+  | EvidenceClipUpdateMessage;
 
 export type StreamConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 

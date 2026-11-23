@@ -50,29 +50,3 @@ export function playViolationAlertChime(volume: number = 0.7): void {
   osc2.stop(ctx.currentTime + 0.35);
 }
 
-/**
- * Plays a pleasant success confirmation tone
- */
-export function playSuccessTone(volume: number = 0.5): void {
-  const ctx = getAudioContext();
-  if (!ctx) return;
-
-  const masterGain = ctx.createGain();
-  masterGain.gain.setValueAtTime(Math.max(0, Math.min(1, volume)), ctx.currentTime);
-  masterGain.connect(ctx.destination);
-
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(523.25, ctx.currentTime); // C5
-  osc.frequency.exponentialRampToValueAtTime(1046.5, ctx.currentTime + 0.18); // C6
-
-  gain.gain.setValueAtTime(0.3, ctx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
-
-  osc.connect(gain);
-  gain.connect(masterGain);
-  osc.start(ctx.currentTime);
-  osc.stop(ctx.currentTime + 0.2);
-}
-

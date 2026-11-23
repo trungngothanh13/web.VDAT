@@ -18,14 +18,6 @@ export const violationApi = {
   },
 
   /**
-   * Get single violation record by ID with camera details & review history
-   */
-  async getViolation(id: string): Promise<Violation> {
-    const { data } = await apiClient.get<Violation>(`/api/violations/${encodeURIComponent(id)}`);
-    return data;
-  },
-
-  /**
    * Review violation: update status to CONFIRMED or DISMISSED with officer notes
    */
   async updateViolationStatus(

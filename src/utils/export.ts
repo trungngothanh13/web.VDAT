@@ -56,19 +56,3 @@ export function exportViolationsToCsv(violations: Violation[], filename: string 
   URL.revokeObjectURL(url);
 }
 
-/**
- * Exports violation list as structured JSON file
- */
-export function exportViolationsToJson(violations: Violation[], filename: string = 'vdat_violations.json'): void {
-  const jsonContent = JSON.stringify(violations, null, 2);
-  const blob = new Blob([jsonContent], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', url);
-  link.setAttribute('download', filename);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
