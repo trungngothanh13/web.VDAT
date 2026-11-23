@@ -5,8 +5,6 @@ import {
   FrameTelemetry,
   StreamConnectionStatus,
   LiveFrameMessage,
-  LiveOverlayPayload,
-  LiveOverlayMessage,
   CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraStatusMessage,
@@ -57,8 +55,6 @@ interface StreamStoreState {
   connectionStatus: StreamConnectionStatus;
   latestFrameImage: string | null;
   latestFrameByCamera: Record<string, string>;
-  latestOverlay: LiveOverlayPayload | null;
-  latestOverlayByCamera: Record<string, LiveOverlayPayload | null>;
   telemetry: FrameTelemetry;
   telemetryByCamera: Record<string, FrameTelemetry>;
   streamFps: number;
@@ -76,7 +72,6 @@ interface StreamStoreState {
 
   // WebSocket message handlers
   handleLiveFrame: (msg: LiveFrameMessage) => void;
-  handleLiveOverlay: (msg: LiveOverlayMessage) => void;
   handleCameraSourceStatus: (msg: CameraSourceStatusMessage) => void;
   handleCameraTelemetry: (msg: CameraTelemetryMessage) => void;
   handleCameraStatus: (msg: CameraStatusMessage) => void;
@@ -102,8 +97,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   connectionStatus: 'disconnected',
   latestFrameImage: null,
   latestFrameByCamera: {},
-  latestOverlay: null,
-  latestOverlayByCamera: {},
   telemetry: { ...DEFAULT_TELEMETRY },
   telemetryByCamera: {},
   streamFps: 0,
@@ -112,11 +105,10 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
 
   setSelectedCamera: (cameraId: string) => {
     vdatWsClient.sendPayload({ type: 'watch_camera', cameraId });
-    const { latestFrameByCamera, latestOverlayByCamera, telemetryByCamera } = get();
+    const { latestFrameByCamera, telemetryByCamera } = get();
     set({
       selectedCameraId: cameraId,
       latestFrameImage: latestFrameByCamera[cameraId] ?? null,
-      latestOverlay: latestOverlayByCamera[cameraId] ?? null,
       telemetry: telemetryByCamera[cameraId] ?? { ...DEFAULT_TELEMETRY },
     });
   },
@@ -156,7 +148,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   setStreamFps: (fps: number) => set({ streamFps: fps }),
 
   handleLiveFrame: (msg: LiveFrameMessage) => {
-    const { selectedCameraId, isPaused, latestFrameByCamera, latestOverlayByCamera, telemetryByCamera } = get();
+    const { selectedCameraId, isPaused, latestFrameByCamera, telemetryByCamera } = get();
     const nextSrc = normalizeFrameSrc(msg.image);
     const prevSrc = latestFrameByCamera[msg.cameraId];
     if (prevSrc && prevSrc !== nextSrc) {
@@ -164,7 +156,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     }
 
     const updatedFrames = { ...latestFrameByCamera, [msg.cameraId]: nextSrc };
-    const updatedOverlays = { ...latestOverlayByCamera, [msg.cameraId]: null };
     const updatedTelemetry = msg.telemetry
       ? { ...telemetryByCamera, [msg.cameraId]: msg.telemetry }
       : telemetryByCamera;
@@ -172,10 +163,8 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     if (msg.cameraId === selectedCameraId && !isPaused) {
       set({
         latestFrameByCamera: updatedFrames,
-        latestOverlayByCamera: updatedOverlays,
         telemetryByCamera: updatedTelemetry,
         latestFrameImage: nextSrc,
-        latestOverlay: null,
         telemetry: msg.telemetry || { ...DEFAULT_TELEMETRY },
         lastFrameTimestamp: msg.timestamp || Date.now(),
         streamFps: msg.telemetry?.fps ?? get().streamFps,
@@ -183,31 +172,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
     } else {
       set({
         latestFrameByCamera: updatedFrames,
-        latestOverlayByCamera: updatedOverlays,
-        telemetryByCamera: updatedTelemetry,
-      });
-    }
-  },
-
-  handleLiveOverlay: (msg: LiveOverlayMessage) => {
-    const { selectedCameraId, isPaused, latestOverlayByCamera, telemetryByCamera } = get();
-    const updatedOverlays = { ...latestOverlayByCamera, [msg.cameraId]: msg.overlay };
-    const updatedTelemetry = msg.telemetry
-      ? { ...telemetryByCamera, [msg.cameraId]: msg.telemetry }
-      : telemetryByCamera;
-
-    if (msg.cameraId === selectedCameraId && !isPaused) {
-      set({
-        latestOverlayByCamera: updatedOverlays,
-        telemetryByCamera: updatedTelemetry,
-        latestOverlay: msg.overlay,
-        telemetry: msg.telemetry || { ...DEFAULT_TELEMETRY },
-        lastFrameTimestamp: msg.timestamp || Date.now(),
-        streamFps: msg.telemetry?.fps ?? get().streamFps,
-      });
-    } else {
-      set({
-        latestOverlayByCamera: updatedOverlays,
         telemetryByCamera: updatedTelemetry,
       });
     }
@@ -219,16 +183,12 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
       const updatedFrames = { ...state.latestFrameByCamera };
       revokeBlobUrlSoon(updatedFrames[msg.cameraId]);
       delete updatedFrames[msg.cameraId];
-      const updatedOverlays = { ...state.latestOverlayByCamera };
-      delete updatedOverlays[msg.cameraId];
       const isFocused = msg.cameraId === state.selectedCameraId;
       return {
         latestFrameByCamera: updatedFrames,
-        latestOverlayByCamera: updatedOverlays,
         ...(isFocused
           ? {
               latestFrameImage: null,
-              latestOverlay: null,
               telemetry: { ...DEFAULT_TELEMETRY },
             }
           : {}),

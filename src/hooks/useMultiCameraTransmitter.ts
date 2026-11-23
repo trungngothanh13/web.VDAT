@@ -24,10 +24,7 @@ export interface CameraChannelState {
 interface CameraChannelRuntime {
   video: HTMLVideoElement;
   canvas: HTMLCanvasElement;
-  uploadCanvas: HTMLCanvasElement;
   hasSnapshotFrame: boolean;
-  frameBuffer: Map<number, HTMLCanvasElement>;
-  frameBufferOrder: number[];
   mediaStream: MediaStream | null;
   objectUrl: string | null;
   timer: ReturnType<typeof setInterval> | null;
@@ -39,10 +36,7 @@ interface CameraChannelRuntime {
 }
 
 const MAX_WS_BUFFERED_BYTES = 512 * 1024; // Skip frame upload if WebSocket queue > 512 KB
-const UPLOAD_WIDTH = 640;
-const UPLOAD_HEIGHT = 360;
-const UPLOAD_QUALITY = 0.5;
-const MAX_LOCAL_FRAME_BUFFER = 24;
+const UPLOAD_QUALITY = 0.68;
 const textEncoder = new TextEncoder();
 
 let cachedUploadMime: 'image/webp' | 'image/jpeg' | null = null;
@@ -146,17 +140,10 @@ export function useMultiCameraTransmitter() {
       canvas.width = DEFAULT_CAMERA_WIDTH;
       canvas.height = DEFAULT_CAMERA_HEIGHT;
 
-      const uploadCanvas = document.createElement('canvas');
-      uploadCanvas.width = UPLOAD_WIDTH;
-      uploadCanvas.height = UPLOAD_HEIGHT;
-
       runtime = {
         video,
         canvas,
-        uploadCanvas,
         hasSnapshotFrame: false,
-        frameBuffer: new Map(),
-        frameBufferOrder: [],
         mediaStream: null,
         objectUrl: null,
         timer: null,
@@ -263,8 +250,6 @@ export function useMultiCameraTransmitter() {
           runtime.mediaStream = null;
         }
         runtime.hasSnapshotFrame = false;
-        runtime.frameBuffer.clear();
-        runtime.frameBufferOrder = [];
         runtime.video.pause();
         runtime.video.srcObject = null;
         runtime.video.removeAttribute('src');
@@ -311,8 +296,6 @@ export function useMultiCameraTransmitter() {
         const runtime = runtimesRef.current.get(msg.cameraId);
         if (runtime) {
           runtime.hasSnapshotFrame = false;
-          runtime.frameBuffer.clear();
-          runtime.frameBufferOrder = [];
           const mainCtx = runtime.canvas.getContext('2d');
           mainCtx?.clearRect(0, 0, runtime.canvas.width, runtime.canvas.height);
           for (const pCanvas of runtime.previewCanvases) {
@@ -351,14 +334,11 @@ export function useMultiCameraTransmitter() {
       }
 
       const ctx = runtime.canvas.getContext('2d');
-      const uploadCtx = runtime.uploadCanvas.getContext('2d');
-      if (!ctx || !uploadCtx) return;
+      if (!ctx) return;
 
       runtime.frameCounter = 0;
       runtime.encodingInFlight = false;
       runtime.lastUploadAt = 0;
-      runtime.frameBuffer.clear();
-      runtime.frameBufferOrder = [];
       const uploadMime = getUploadMimeType();
 
       vdatWsClient.sendPayload({
@@ -367,7 +347,6 @@ export function useMultiCameraTransmitter() {
         sourceType: activeType,
         sourceKey,
         label,
-        overlayOnly: activeType === 'laptop_webcam',
         fps: requestedFps,
         width: DEFAULT_CAMERA_WIDTH,
         height: DEFAULT_CAMERA_HEIGHT,
@@ -375,7 +354,7 @@ export function useMultiCameraTransmitter() {
 
       const tickMs = Math.max(33, Math.round(1000 / Math.max(10, requestedFps)));
       runtime.timer = setInterval(() => {
-        const { video, canvas, uploadCanvas, previewCanvases } = runtime;
+        const { video, canvas, previewCanvases } = runtime;
         if (video.paused || video.ended || video.readyState < 2) {
           return;
         }
@@ -418,30 +397,7 @@ export function useMultiCameraTransmitter() {
         const nextFrameId = runtime.frameCounter + 1;
         runtime.frameCounter = nextFrameId;
 
-        // Save crisp 854x480 frame in a 24-frame ring buffer for pixel-exact overlay compositing
-        let bufferedCanvas = runtime.frameBuffer.get(nextFrameId);
-        if (!bufferedCanvas) {
-          if (runtime.frameBufferOrder.length >= MAX_LOCAL_FRAME_BUFFER) {
-            const evictedId = runtime.frameBufferOrder.shift();
-            if (evictedId !== undefined) {
-              bufferedCanvas = runtime.frameBuffer.get(evictedId);
-              runtime.frameBuffer.delete(evictedId);
-            }
-          }
-          if (!bufferedCanvas) {
-            bufferedCanvas = document.createElement('canvas');
-            bufferedCanvas.width = DEFAULT_CAMERA_WIDTH;
-            bufferedCanvas.height = DEFAULT_CAMERA_HEIGHT;
-          }
-          bufferedCanvas.getContext('2d')?.drawImage(canvas, 0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
-          runtime.frameBuffer.set(nextFrameId, bufferedCanvas);
-          runtime.frameBufferOrder.push(nextFrameId);
-        }
-
-        // Downscale uplink frame to 640x360 WebP (~4x smaller over SSH tunnel)
-        uploadCtx.drawImage(canvas, 0, 0, UPLOAD_WIDTH, UPLOAD_HEIGHT);
-
-        uploadCanvas.toBlob(
+        canvas.toBlob(
           (blob) => {
             if (!blob) {
               runtime.encodingInFlight = false;
@@ -727,19 +683,6 @@ export function useMultiCameraTransmitter() {
     }
   }, []);
 
-  const getBufferedFrame = useCallback(
-    (cameraId: string, frameId?: number | null): HTMLCanvasElement | null => {
-      const runtime = runtimesRef.current.get(cameraId);
-      if (!runtime) return null;
-      if (typeof frameId === 'number') {
-        const exact = runtime.frameBuffer.get(frameId);
-        if (exact) return exact;
-      }
-      return runtime.hasSnapshotFrame ? runtime.canvas : null;
-    },
-    []
-  );
-
   useEffect(() => {
     return () => {
       for (const runtime of runtimesRef.current.values()) {
@@ -775,6 +718,5 @@ export function useMultiCameraTransmitter() {
     bindPreviewCanvas,
     getPreviewCanvasRef,
     getChannelSnapshot,
-    getBufferedFrame,
   };
 }

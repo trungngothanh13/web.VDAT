@@ -15,6 +15,7 @@ import {
   useMultiCameraTransmitter,
 } from './hooks';
 import { evidenceApi } from './api/evidence.api';
+import { vdatWsClient } from './websocket/client';
 import { exportViolationsToCsv } from './utils/export';
 import { formatConfidence, formatDateTime, formatShortRelativeTime } from './utils/formatters';
 import {
@@ -143,7 +144,10 @@ export function App() {
 
   const zoneEditor = useZoneEditor();
   const zoneCanvasRef = useRef<HTMLCanvasElement>(null);
-  const liveOverlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const liveStreamCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [hasLiveCanvasFrame, setHasLiveCanvasFrame] = useState(false);
+  const isStreamPausedRef = useRef(stream.isPaused);
+  isStreamPausedRef.current = stream.isPaused;
   const initializedCameraConfigRef = useRef<string | null>(null);
   const initializedCameraSourceRef = useRef<string | null>(null);
 
@@ -675,132 +679,101 @@ export function App() {
     zoneEditor.selectedVertex,
   ]);
 
-  // Draw low-bandwidth webcam overlay (local buffered 854x480 frame + AI detections + zones)
+  // Zero-React-rerender off-thread JPEG decoder + adaptive jitter-buffered <canvas> video player
   useEffect(() => {
-    if (
-      activeTab !== 'monitor' ||
-      isAnnotatingZones ||
-      focusedChannel.sourceType !== 'laptop_webcam' ||
-      !stream.isCameraLive ||
-      !stream.latestOverlay
-    ) {
+    setHasLiveCanvasFrame(false);
+    if (!auth.isAuthenticated || activeTab !== 'monitor' || isAnnotatingZones) {
       return;
     }
-    const canvas = liveOverlayCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
 
-    const frameCanvas = transmitters.getBufferedFrame(
-      focusedCameraId,
-      stream.latestOverlay.sourceFrameId
-    );
-    if (!frameCanvas) return;
+    let cancelled = false;
+    const queue: ImageBitmap[] = [];
+    const MAX_QUEUE = 4;
+    let emaIntervalMs = 55;
+    let lastArrivalAt = 0;
+    let lastDrawAt = 0;
+    let rafId = 0;
+    let firstFrameShown = false;
 
-    ctx.clearRect(0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
-    ctx.drawImage(frameCanvas, 0, 0, DEFAULT_CAMERA_WIDTH, DEFAULT_CAMERA_HEIGHT);
-
-    // Draw saved zones over the local frame
-    const cfg = currentCamera?.config;
-    if (cfg) {
-      if (Array.isArray(cfg.lanes)) {
-        cfg.lanes.forEach((lane) => {
-          if (lane.length < 3) return;
-          ctx.beginPath();
-          ctx.moveTo(lane[0][0], lane[0][1]);
-          for (let i = 1; i < lane.length; i++) ctx.lineTo(lane[i][0], lane[i][1]);
-          ctx.closePath();
-          ctx.lineWidth = 2;
-          ctx.strokeStyle = '#ffff00';
-          ctx.stroke();
-        });
+    const clearQueue = () => {
+      while (queue.length > 0) {
+        queue.shift()?.close();
       }
-      if (Array.isArray(cfg.intersection) && cfg.intersection.length >= 3) {
-        ctx.beginPath();
-        ctx.moveTo(cfg.intersection[0][0], cfg.intersection[0][1]);
-        for (let i = 1; i < cfg.intersection.length; i++) {
-          ctx.lineTo(cfg.intersection[i][0], cfg.intersection[i][1]);
-        }
-        ctx.closePath();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#00ffff';
-        ctx.stroke();
-      }
-      if (Array.isArray(cfg.exitZones)) {
-        cfg.exitZones.forEach((ez) => {
-          if (ez.length < 3) return;
-          ctx.beginPath();
-          ctx.moveTo(ez[0][0], ez[0][1]);
-          for (let i = 1; i < ez.length; i++) ctx.lineTo(ez[i][0], ez[i][1]);
-          ctx.closePath();
-          ctx.lineWidth = 2;
-          ctx.strokeStyle = '#ff8c00';
-          ctx.stroke();
-        });
-      }
-      if (Array.isArray(cfg.lightBox)) {
-        (cfg.lightBox as TrafficLightSamplingBox[]).forEach((lb) => {
-          ctx.beginPath();
-          ctx.arc(lb.x, lb.y, 3, 0, Math.PI * 2);
-          ctx.fillStyle = lb.color === 'green' ? '#22c55e' : '#ef4444';
-          ctx.fill();
-        });
-      }
-    }
-
-    const OVERLAY_COLORS: Record<string, string> = {
-      bike: '#ff32ff',
-      car: '#32e632',
-      moto: '#00d7ff',
-      bus: '#ff8c00',
-      truck: '#ffeb00',
     };
 
-    const srcW = stream.latestOverlay.width || DEFAULT_CAMERA_WIDTH;
-    const srcH = stream.latestOverlay.height || DEFAULT_CAMERA_HEIGHT;
-    const scaleX = DEFAULT_CAMERA_WIDTH / srcW;
-    const scaleY = DEFAULT_CAMERA_HEIGHT / srcH;
+    const unsubRaw = vdatWsClient.onRawLiveFrame((pkt) => {
+      if (cancelled || pkt.cameraId !== focusedCameraId || isStreamPausedRef.current) return;
+      const now = performance.now();
+      if (lastArrivalAt > 0) {
+        const delta = now - lastArrivalAt;
+        if (delta >= 15 && delta <= 250) {
+          emaIntervalMs = emaIntervalMs * 0.8 + delta * 0.2;
+        }
+      }
+      lastArrivalAt = now;
 
-    const ordered = [...stream.latestOverlay.detections].sort((a, b) => a[6] - b[6]);
-    ctx.font = '600 11px Inter, sans-serif';
-    ctx.textBaseline = 'top';
+      void createImageBitmap(pkt.blob)
+        .then((bitmap) => {
+          if (cancelled) {
+            bitmap.close();
+            return;
+          }
+          if (queue.length >= MAX_QUEUE) {
+            queue.shift()?.close();
+          }
+          queue.push(bitmap);
+        })
+        .catch(() => {
+          // Ignore corrupt/cancelled decode
+        });
+    });
 
-    for (const det of ordered) {
-      const [rx1, ry1, rx2, ry2, shortName, trackId, isViolFlag] = det;
-      const x1 = rx1 * scaleX;
-      const y1 = ry1 * scaleY;
-      const w = (rx2 - rx1) * scaleX;
-      const h = (ry2 - ry1) * scaleY;
-      const isViolation = isViolFlag === 1;
-      const color = isViolation ? '#ef4444' : OVERLAY_COLORS[shortName] || '#00ffff';
-      const label = isViolation ? `${shortName} #${trackId}` : shortName;
+    const unsubStatus = vdatWsClient.onCameraSourceStatus((msg) => {
+      if (msg.cameraId === focusedCameraId && (msg.status === 'stopped' || msg.status === 'ended')) {
+        clearQueue();
+        firstFrameShown = false;
+        setHasLiveCanvasFrame(false);
+      }
+    });
 
-      ctx.strokeStyle = color;
-      ctx.lineWidth = isViolation ? 2 : 1;
-      ctx.strokeRect(x1, y1, w, h);
+    const drawLoop = (now: number) => {
+      if (cancelled) return;
+      rafId = requestAnimationFrame(drawLoop);
 
-      const metrics = ctx.measureText(label);
-      const padX = 3;
-      const padY = 2;
-      const badgeW = metrics.width + padX * 2;
-      const badgeH = 13 + padY * 2;
-      const badgeY = Math.max(0, y1 - badgeH);
-      ctx.fillStyle = color;
-      ctx.fillRect(x1, badgeY, badgeW, badgeH);
+      if (queue.length === 0) return;
 
-      ctx.fillStyle = isViolation ? '#ffffff' : '#000000';
-      ctx.fillText(label, x1 + padX, badgeY + padY);
-    }
-  }, [
-    activeTab,
-    isAnnotatingZones,
-    focusedChannel.sourceType,
-    focusedCameraId,
-    stream.isCameraLive,
-    stream.latestOverlay,
-    currentCamera?.config,
-    transmitters,
-  ]);
+      const basePace = Math.min(85, Math.max(32, emaIntervalMs));
+      const targetGap =
+        queue.length >= 3 ? basePace * 0.55 : queue.length === 2 ? basePace * 0.8 : basePace * 0.92;
+
+      if (lastDrawAt === 0 || now - lastDrawAt >= targetGap) {
+        const canvas = liveStreamCanvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        const bitmap = queue.shift();
+        if (bitmap) {
+          if (canvas && ctx) {
+            ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            lastDrawAt = now;
+            if (!firstFrameShown) {
+              firstFrameShown = true;
+              setHasLiveCanvasFrame(true);
+            }
+          }
+          bitmap.close();
+        }
+      }
+    };
+
+    rafId = requestAnimationFrame(drawLoop);
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+      unsubRaw();
+      unsubStatus();
+      clearQueue();
+    };
+  }, [auth.isAuthenticated, activeTab, isAnnotatingZones, focusedCameraId]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -830,7 +803,9 @@ export function App() {
     const nextOpen = forceOpen !== undefined ? forceOpen : !isAnnotatingZones;
     setZoneSyncBanner(null);
     if (nextOpen) {
-      const snap = transmitters.getChannelSnapshot(camId);
+      const snap =
+        transmitters.getChannelSnapshot(camId) ||
+        (hasLiveCanvasFrame ? liveStreamCanvasRef.current?.toDataURL('image/jpeg', 0.88) ?? null : null);
       setEditorSnapshotUrl(snap);
     } else {
       setEditorSnapshotUrl(null);
@@ -1537,66 +1512,62 @@ export function App() {
                       </>
                     );
                   })()
-                ) : focusedChannel.sourceType === 'laptop_webcam' &&
-                  stream.isCameraLive &&
-                  stream.latestOverlay ? (
-                  <canvas
-                    ref={liveOverlayCanvasRef}
-                    width={DEFAULT_CAMERA_WIDTH}
-                    height={DEFAULT_CAMERA_HEIGHT}
-                    className="stream-canvas"
-                    aria-label={`Live AI feed from ${focusedCameraId}`}
-                  />
-                ) : stream.latestFrameImage && stream.isCameraLive ? (
-                  <img
-                    className="stream-canvas"
-                    src={stream.latestFrameImage}
-                    alt={`Live AI feed from ${focusedCameraId}`}
-                  />
                 ) : (
-                  <div className="stream-placeholder">
-                    <div className="spinner" aria-hidden="true" />
-                    {focusedChannel.uploadProgress !== null ? (
-                      <>
-                        <span style={{ color: 'var(--primary-text)', fontWeight: 600 }}>
-                          {focusedChannel.uploadProgress < 100
-                            ? `Uploading "${focusedChannel.sourceLabel}" to AI engine (${focusedChannel.uploadProgress}%)...`
-                            : `Syncing "${focusedChannel.sourceLabel}" to AI engine...`}
-                        </span>
-                        <span style={{ fontSize: '0.78rem', maxInlineSize: '60ch' }}>
-                          Video plays locally on the AI host once synced so zero uplink bandwidth is used during analysis.
-                        </span>
-                      </>
-                    ) : focusedChannel.isBroadcasting && !stream.isCameraLive ? (
-                      <>
-                        <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
-                          {focusedChannel.isAiHostedVideo
-                            ? `Hosting "${focusedChannel.sourceLabel}" on ${focusedCameraId}, waiting for AI stream...`
-                            : `Feeding "${focusedChannel.sourceLabel}" (${focusedChannel.transmittedFrames} frames sent), but AI session for ${focusedCameraId} is not connected`}
-                        </span>
-                        <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
-                          Start the multi-camera AI engine with{' '}
-                          <code>
-                            python main.py --web-input --cameras {cameraSlots.map((c) => c.id).join(' ')} --ws-url ws://localhost:5000/ws/inference --no-video
-                          </code>
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        <span>Waiting for AI-annotated camera stream ({focusedCameraId})</span>
-                        <span style={{ fontSize: '0.78rem' }}>
-                          Open the camera title menu above to choose a video file or laptop camera while the AI engine is connected
-                        </span>
-                        <button
-                          type="button"
-                          className="btn btn-compact btn-active"
-                          onClick={openSourceDialog}
-                        >
-                          Choose Source...
-                        </button>
-                      </>
+                  <>
+                    <canvas
+                      ref={liveStreamCanvasRef}
+                      width={DEFAULT_CAMERA_WIDTH}
+                      height={DEFAULT_CAMERA_HEIGHT}
+                      className="stream-canvas"
+                      style={{ display: hasLiveCanvasFrame && stream.isCameraLive ? 'block' : 'none' }}
+                      aria-label={`Live AI feed from ${focusedCameraId}`}
+                    />
+                    {(!hasLiveCanvasFrame || !stream.isCameraLive) && (
+                      <div className="stream-placeholder">
+                        <div className="spinner" aria-hidden="true" />
+                        {focusedChannel.uploadProgress !== null ? (
+                          <>
+                            <span style={{ color: 'var(--primary-text)', fontWeight: 600 }}>
+                              {focusedChannel.uploadProgress < 100
+                                ? `Uploading "${focusedChannel.sourceLabel}" to AI engine (${focusedChannel.uploadProgress}%)...`
+                                : `Syncing "${focusedChannel.sourceLabel}" to AI engine...`}
+                            </span>
+                            <span style={{ fontSize: '0.78rem', maxInlineSize: '60ch' }}>
+                              Video plays locally on the AI host once synced so zero uplink bandwidth is used during analysis.
+                            </span>
+                          </>
+                        ) : focusedChannel.isBroadcasting && !stream.isCameraLive ? (
+                          <>
+                            <span style={{ color: 'var(--warning-text)', fontWeight: 600 }}>
+                              {focusedChannel.isAiHostedVideo
+                                ? `Hosting "${focusedChannel.sourceLabel}" on ${focusedCameraId}, waiting for AI stream...`
+                                : `Feeding "${focusedChannel.sourceLabel}" (${focusedChannel.transmittedFrames} frames sent), but AI session for ${focusedCameraId} is not connected`}
+                            </span>
+                            <span style={{ fontSize: '0.78rem', maxInlineSize: '64ch' }}>
+                              Start the multi-camera AI engine with{' '}
+                              <code>
+                                python main.py --web-input --cameras {cameraSlots.map((c) => c.id).join(' ')} --ws-url ws://localhost:5000/ws/inference --no-video
+                              </code>
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span>Waiting for AI-annotated camera stream ({focusedCameraId})</span>
+                            <span style={{ fontSize: '0.78rem' }}>
+                              Open the camera title menu above to choose a video file or laptop camera while the AI engine is connected
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-compact btn-active"
+                              onClick={openSourceDialog}
+                            >
+                              Choose Source...
+                            </button>
+                          </>
+                        )}
+                      </div>
                     )}
-                  </div>
+                  </>
                 )}
               </div>
 

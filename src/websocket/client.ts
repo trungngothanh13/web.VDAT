@@ -3,8 +3,8 @@ import { STORAGE_KEYS } from '../config/constants';
 import {
   InboundWSMessage,
   StreamConnectionStatus,
+  FrameTelemetry,
   LiveFrameMessage,
-  LiveOverlayMessage,
   CameraSourceStatusMessage,
   CameraTelemetryMessage,
   CameraProfileSwitchedMessage,
@@ -15,6 +15,13 @@ import {
   AiTrackerStatusMessage,
   ConnectionEstablishedMessage,
 } from '../types/websocket.types';
+
+export interface RawLiveFramePacket {
+  cameraId: string;
+  blob: Blob;
+  telemetry?: FrameTelemetry;
+  timestamp: number;
+}
 
 type MessageHandler<T> = (data: T) => void;
 type StatusHandler = (status: StreamConnectionStatus) => void;
@@ -32,9 +39,11 @@ export class VdatWebSocketClient {
 
   // Event listener registries
   private liveFrameListeners = new Set<MessageHandler<LiveFrameMessage>>();
-  private liveOverlayListeners = new Set<MessageHandler<LiveOverlayMessage>>();
+  private rawLiveFrameListeners = new Set<MessageHandler<RawLiveFramePacket>>();
   private cameraSourceStatusListeners = new Set<MessageHandler<CameraSourceStatusMessage>>();
   private cameraTelemetryListeners = new Set<MessageHandler<CameraTelemetryMessage>>();
+  private lastFocusedTelemetryAt = new Map<string, number>();
+  private lastFocusedTelemetryMeta = new Map<string, { violations?: number; light?: string }>();
   private cameraProfileListeners = new Set<MessageHandler<CameraProfileSwitchedMessage>>();
   private violationAlertListeners = new Set<MessageHandler<ViolationAlertMessage>>();
   private evidenceClipListeners = new Set<MessageHandler<EvidenceClipUpdateMessage>>();
@@ -171,9 +180,9 @@ export class VdatWebSocketClient {
     return () => this.liveFrameListeners.delete(handler);
   }
 
-  public onLiveOverlay(handler: MessageHandler<LiveOverlayMessage>): () => void {
-    this.liveOverlayListeners.add(handler);
-    return () => this.liveOverlayListeners.delete(handler);
+  public onRawLiveFrame(handler: MessageHandler<RawLiveFramePacket>): () => void {
+    this.rawLiveFrameListeners.add(handler);
+    return () => this.rawLiveFrameListeners.delete(handler);
   }
 
   public onCameraSourceStatus(handler: MessageHandler<CameraSourceStatusMessage>): () => void {
@@ -251,13 +260,53 @@ export class VdatWebSocketClient {
 
     if (header.type === 'live_frame') {
       const jpegBytes = new Uint8Array(buffer, 4 + headerLen);
-      const blobUrl = URL.createObjectURL(new Blob([jpegBytes], { type: 'image/jpeg' }));
+      const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+      const ts = header.timestamp || Date.now();
+      const cameraId = String(header.cameraId || 'cam-01');
+
+      if (this.rawLiveFrameListeners.size > 0) {
+        const pkt: RawLiveFramePacket = {
+          cameraId,
+          blob,
+          telemetry: header.telemetry,
+          timestamp: ts,
+        };
+        for (const listener of this.rawLiveFrameListeners) {
+          listener(pkt);
+        }
+
+        // Throttle React/Zustand HUD telemetry updates (~5 Hz) while still updating immediately on violation or light changes
+        if (header.telemetry) {
+          const prevMeta = this.lastFocusedTelemetryMeta.get(cameraId);
+          const nextViol = header.telemetry.violations_count;
+          const nextLight = header.telemetry.light_state;
+          const changedCritical =
+            !prevMeta || prevMeta.violations !== nextViol || prevMeta.light !== nextLight;
+          const lastAt = this.lastFocusedTelemetryAt.get(cameraId) ?? 0;
+          if (changedCritical || ts - lastAt >= 200) {
+            this.lastFocusedTelemetryAt.set(cameraId, ts);
+            this.lastFocusedTelemetryMeta.set(cameraId, {
+              violations: nextViol,
+              light: nextLight,
+            });
+            this.routeMessage({
+              type: 'camera_telemetry',
+              cameraId,
+              telemetry: header.telemetry,
+              timestamp: ts,
+            });
+          }
+        }
+        return;
+      }
+
+      const blobUrl = URL.createObjectURL(blob);
       this.routeMessage({
         type: 'live_frame',
-        cameraId: header.cameraId,
+        cameraId,
         telemetry: header.telemetry,
         image: blobUrl,
-        timestamp: header.timestamp || Date.now(),
+        timestamp: ts,
       } as LiveFrameMessage);
     }
   }
@@ -266,9 +315,6 @@ export class VdatWebSocketClient {
     switch (msg.type) {
       case 'live_frame':
         for (const listener of this.liveFrameListeners) listener(msg);
-        break;
-      case 'live_overlay':
-        for (const listener of this.liveOverlayListeners) listener(msg);
         break;
       case 'camera_source_status':
         for (const listener of this.cameraSourceStatusListeners) listener(msg);

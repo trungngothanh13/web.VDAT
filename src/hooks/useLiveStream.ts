@@ -35,13 +35,9 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
       store.setConnectionStatus(status);
     });
 
-    // Subscribe to incoming live frames and overlay-only updates
+    // Subscribe to incoming live frames and AI-hosted source status updates
     const unsubFrame = vdatWsClient.onLiveFrame((msg) => {
       store.handleLiveFrame(msg);
-    });
-
-    const unsubOverlay = vdatWsClient.onLiveOverlay((msg) => {
-      store.handleLiveOverlay(msg);
     });
 
     const unsubSourceStatus = vdatWsClient.onCameraSourceStatus((msg) => {
@@ -81,7 +77,6 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     unsubscribeRefs.current = [
       unsubStatus,
       unsubFrame,
-      unsubOverlay,
       unsubSourceStatus,
       unsubTelemetry,
       unsubCamStatus,
@@ -111,8 +106,6 @@ export function useLiveStream(options?: UseLiveStreamOptions) {
     isCameraLive,
     latestFrameImage: store.latestFrameImage,
     latestFrameByCamera: store.latestFrameByCamera,
-    latestOverlay: store.latestOverlay,
-    latestOverlayByCamera: store.latestOverlayByCamera,
     telemetry: store.telemetry,
     telemetryByCamera: store.telemetryByCamera,
     streamFps: store.streamFps,
