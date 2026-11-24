@@ -22,14 +22,8 @@ export function LiveStreamViewport({
   onOpenSourceDialog,
 }: LiveStreamViewportProps) {
   const liveStreamCanvasRef = useRef<HTMLCanvasElement>(null);
-  const isPausedRef = useRef(stream.isPaused);
-  isPausedRef.current = stream.isPaused;
 
-  const hasLiveCanvasFrame = useLiveCanvasPlayer(
-    liveStreamCanvasRef,
-    focusedCameraId,
-    isPausedRef
-  );
+  const hasLiveCanvasFrame = useLiveCanvasPlayer(liveStreamCanvasRef, focusedCameraId);
 
   return (
     <>

@@ -107,20 +107,6 @@ export function CameraActionMenu({
             <span>Bypass Zone Annotations</span>
           </button>
 
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={stream.isPaused}
-            disabled={!focusedChannel.isBroadcasting && !stream.isCameraLive}
-            onKeyDown={camMenu.onCheckboxKeyDown}
-            onClick={() => {
-              stream.togglePause();
-              camMenu.closeAfterCheckboxAction();
-            }}
-          >
-            <span>Pause Feed</span>
-          </button>
-
           {focusedChannel.sourceType === 'video_file' && (
             <button
               type="button"

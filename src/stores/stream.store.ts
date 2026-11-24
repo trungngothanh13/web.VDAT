@@ -46,7 +46,6 @@ interface StreamStoreState {
   bypassZonesByCamera: Record<string, boolean>;
   telemetry: FrameTelemetry;
   telemetryByCamera: Record<string, FrameTelemetry>;
-  isPaused: boolean;
 
   // Actions
   setSelectedCamera: (cameraId: string) => void;
@@ -54,7 +53,6 @@ interface StreamStoreState {
   switchAiTracker: (tracker: AiTrackerType) => void;
   setCameraBypassZones: (cameraId: string, bypass: boolean) => void;
   setConnectionStatus: (status: StreamConnectionStatus) => void;
-  togglePause: () => void;
 
   // WebSocket message handlers
   handleCameraPreview: (msg: CameraPreviewMessage) => void;
@@ -85,7 +83,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   bypassZonesByCamera: {},
   telemetry: { ...DEFAULT_TELEMETRY },
   telemetryByCamera: {},
-  isPaused: false,
 
   setSelectedCamera: (cameraId: string) => {
     vdatWsClient.sendPayload({ type: 'watch_camera', cameraId });
@@ -136,8 +133,6 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
   setConnectionStatus: (status: StreamConnectionStatus) => {
     set({ connectionStatus: status });
   },
-
-  togglePause: () => set((state) => ({ isPaused: !state.isPaused })),
 
   handleCameraPreview: (msg: CameraPreviewMessage) => {
     if (!msg.image) return;
@@ -190,9 +185,7 @@ export const useStreamStore = create<StreamStoreState>((set, get) => ({
 
     set((curr) => ({
       telemetryByCamera: { ...curr.telemetryByCamera, [msg.cameraId]: msg.telemetry },
-      ...(msg.cameraId === curr.selectedCameraId && !curr.isPaused
-        ? { telemetry: msg.telemetry }
-        : {}),
+      ...(msg.cameraId === curr.selectedCameraId ? { telemetry: msg.telemetry } : {}),
     }));
   },
 

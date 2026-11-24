@@ -1,10 +1,9 @@
-import { useEffect, useState, type MutableRefObject, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import { vdatWsClient } from '../websocket/client';
 
 export function useLiveCanvasPlayer(
   canvasRef: RefObject<HTMLCanvasElement | null>,
-  cameraId: string,
-  isPausedRef: MutableRefObject<boolean>
+  cameraId: string
 ): boolean {
   const [hasFrame, setHasFrame] = useState(false);
 
@@ -27,7 +26,7 @@ export function useLiveCanvasPlayer(
     };
 
     const unsubRaw = vdatWsClient.onRawLiveFrame((pkt) => {
-      if (cancelled || pkt.cameraId !== cameraId || isPausedRef.current) return;
+      if (cancelled || pkt.cameraId !== cameraId) return;
       const now = performance.now();
       if (lastArrivalAt > 0) {
         const delta = now - lastArrivalAt;
@@ -98,7 +97,7 @@ export function useLiveCanvasPlayer(
       unsubStatus();
       clearQueue();
     };
-  }, [cameraId, canvasRef, isPausedRef]);
+  }, [cameraId, canvasRef]);
 
   return hasFrame;
 }

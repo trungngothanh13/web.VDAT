@@ -16,7 +16,6 @@ export function useLiveStream(autoConnect: boolean = true) {
       connectionStatus: s.connectionStatus,
       cameraPreviews: s.cameraPreviews,
       bypassZonesByCamera: s.bypassZonesByCamera,
-      isPaused: s.isPaused,
     }))
   );
 
@@ -64,6 +63,5 @@ export function useLiveStream(autoConnect: boolean = true) {
     switchAiModel: actions.switchAiModel,
     switchAiTracker: actions.switchAiTracker,
     setCameraBypassZones: actions.setCameraBypassZones,
-    togglePause: actions.togglePause,
   };
 }
